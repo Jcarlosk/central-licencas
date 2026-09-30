@@ -26,11 +26,16 @@ const schema = z.object({
 });
 
 export type Env = z.infer<typeof schema>;
+export class EnvValidationError extends Error {
+  constructor(public readonly fields: string[]) {
+    super(`Invalid environment fields: ${fields.join(', ')}`);
+  }
+}
 export function loadEnv(): Env {
   const result = schema.safeParse(process.env);
   if (!result.success) {
     // Only field names: never include environment values in errors.
-    throw new Error(`Invalid environment fields: ${[...new Set(result.error.issues.map(i => i.path.join('.')))].join(', ')}`);
+    throw new EnvValidationError([...new Set(result.error.issues.map(i => i.path.join('.')))]);
   }
   return result.data;
 }

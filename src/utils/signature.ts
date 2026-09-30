@@ -3,6 +3,19 @@ import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import type { Env } from '../config/env.js';
 
+export type SigningKeyErrorCode = 'KEY_PAIR_INVALID' | 'KEY_PAIR_MISMATCH' | 'PRIVATE_KEY_MISSING' | 'PUBLIC_KEY_MISSING';
+export class SigningKeyConfigurationError extends Error {
+  constructor(public readonly code: SigningKeyErrorCode) {
+    super('Signing keys unavailable, invalid, or mismatched');
+  }
+}
+
+function safeKeyError(error: unknown): never {
+  if (error instanceof SigningKeyConfigurationError) throw error;
+  // Discard underlying OpenSSL/filesystem errors, causes and sensitive values.
+  throw new SigningKeyConfigurationError('KEY_PAIR_INVALID');
+}
+
 export const signedLicenseSchema = z.object({
   installationId: z.string(), product: z.string(),
   status: z.enum(['ACTIVE', 'GRACE', 'SUSPENDED', 'REVOKED', 'EXPIRED']),
@@ -28,17 +41,26 @@ export function verifyLicense(payload: SignedLicense, signature: string, publicK
 function parseSigningKeys(privatePem: Buffer, publicPem: Buffer) {
   const privateKey = createPrivateKey({ key: privatePem, format: 'pem' });
   const publicKey = createPublicKey({ key: publicPem, format: 'pem' });
-  if (privateKey.asymmetricKeyType !== 'ed25519' || publicKey.asymmetricKeyType !== 'ed25519') throw new Error();
+  if (privateKey.asymmetricKeyType !== 'ed25519' || publicKey.asymmetricKeyType !== 'ed25519') throw new SigningKeyConfigurationError('KEY_PAIR_INVALID');
   const probe = Buffer.from('central-licencas-key-check');
-  if (!verify(null, probe, publicKey, sign(null, probe, privateKey))) throw new Error();
+  if (!verify(null, probe, publicKey, sign(null, probe, privateKey))) throw new SigningKeyConfigurationError('KEY_PAIR_MISMATCH');
   return { privateKey, publicKey };
+}
+
+function readSigningPem(path: string, missingCode: 'PRIVATE_KEY_MISSING' | 'PUBLIC_KEY_MISSING') {
+  try { return readFileSync(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') throw new SigningKeyConfigurationError(missingCode);
+    return safeKeyError(error);
+  }
 }
 
 export function loadSigningKeys(privatePath: string | undefined, publicPath: string | undefined) {
   try {
-    if (!privatePath || !publicPath) throw new Error();
-    return parseSigningKeys(readFileSync(privatePath), readFileSync(publicPath));
-  } catch { throw new Error('Signing keys unavailable, invalid, or mismatched'); }
+    if (!privatePath) throw new SigningKeyConfigurationError('PRIVATE_KEY_MISSING');
+    if (!publicPath) throw new SigningKeyConfigurationError('PUBLIC_KEY_MISSING');
+    return parseSigningKeys(readSigningPem(privatePath, 'PRIVATE_KEY_MISSING'), readSigningPem(publicPath, 'PUBLIC_KEY_MISSING'));
+  } catch (error) { return safeKeyError(error); }
 }
 
 function decodeBase64Pem(value: string): Buffer {
@@ -59,7 +81,8 @@ export function loadSigningKeysFromEnv(env: SigningKeyEnv) {
   }
   try {
     // A partial/invalid Base64 pair must fail, never silently fall back to files.
-    if (!privateBase64 || !publicBase64) throw new Error();
+    if (!privateBase64) throw new SigningKeyConfigurationError('PRIVATE_KEY_MISSING');
+    if (!publicBase64) throw new SigningKeyConfigurationError('PUBLIC_KEY_MISSING');
     return parseSigningKeys(decodeBase64Pem(privateBase64), decodeBase64Pem(publicBase64));
-  } catch { throw new Error('Signing keys unavailable, invalid, or mismatched'); }
+  } catch (error) { return safeKeyError(error); }
 }
