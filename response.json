@@ -1,0 +1,12 @@
+﻿{
+    "success":  true,
+    "license":  {
+                    "installationId":  "BANABUIU-001",
+                    "product":  "sistema-atendimento",
+                    "status":  "ACTIVE",
+                    "issuedAt":  "2026-09-30T21:59:25.989Z",
+                    "expiresAt":  "2026-10-30T21:59:25.959Z",
+                    "graceUntil":  "2026-11-04T21:59:25.959Z"
+                },
+    "signature":  "SGJZdMk4Co3M_Qji7-PKuzmq_N4WCJYDPoZxSiI4PJNJe87QkQRuNO9hXoBUFEKDveS0as3jkjFe7m2OPBy8AA"
+}

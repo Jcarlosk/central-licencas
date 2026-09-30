@@ -1,0 +1,122 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AdministrativeStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+
+enum ValidationStatus {
+  ACTIVE
+  GRACE
+  SUSPENDED
+  REVOKED
+  EXPIRED
+}
+
+enum EventType {
+  INSTALLATION_CREATED
+  LICENSE_CREATED
+  LICENSE_RENEWED
+  LICENSE_SUSPENDED
+  LICENSE_REACTIVATED
+  LICENSE_REVOKED
+  LICENSE_VALIDATED
+}
+
+model Admin {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(200)
+  email        String   @unique @db.VarChar(254)
+  passwordHash String
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model Client {
+  id            String         @id @default(uuid()) @db.Uuid
+  name          String         @db.VarChar(200)
+  document      String?        @db.VarChar(50)
+  email         String?        @db.VarChar(254)
+  phone         String?        @db.VarChar(50)
+  active        Boolean        @default(true)
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime       @updatedAt @db.Timestamptz(3)
+  installations Installation[]
+}
+
+model Product {
+  id            String         @id @default(uuid()) @db.Uuid
+  name          String         @db.VarChar(200)
+  code          String         @unique @db.VarChar(100)
+  description   String?        @db.VarChar(2000)
+  active        Boolean        @default(true)
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime       @updatedAt @db.Timestamptz(3)
+  installations Installation[]
+}
+
+model Installation {
+  id                    String            @id @default(uuid()) @db.Uuid
+  clientId              String            @db.Uuid
+  productId             String            @db.Uuid
+  installationId        String            @unique @db.VarChar(100)
+  name                  String            @db.VarChar(200)
+  secretHash            String            @db.Char(64)
+  active                Boolean           @default(true)
+  lastValidationAt      DateTime?         @db.Timestamptz(3)
+  lastValidationStatus  ValidationStatus?
+  lastValidationEventAt DateTime?         @db.Timestamptz(3)
+  createdAt             DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime          @updatedAt @db.Timestamptz(3)
+  client                Client            @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  product               Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  license               License?
+  events                LicenseEvent[]
+
+  @@index([clientId])
+  @@index([productId])
+}
+
+model License {
+  id             String               @id @default(uuid()) @db.Uuid
+  installationId String               @unique @db.Uuid
+  status         AdministrativeStatus @default(ACTIVE)
+  startsAt       DateTime             @db.Timestamptz(3)
+  expiresAt      DateTime             @db.Timestamptz(3)
+  graceUntil     DateTime             @db.Timestamptz(3)
+  suspendedAt    DateTime?            @db.Timestamptz(3)
+  revokedAt      DateTime?            @db.Timestamptz(3)
+  notes          String?              @db.VarChar(2000)
+  createdAt      DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime             @updatedAt @db.Timestamptz(3)
+  installation   Installation         @relation(fields: [installationId], references: [id], onDelete: Restrict)
+  events         LicenseEvent[]
+
+  @@index([status, expiresAt])
+}
+
+model LicenseEvent {
+  id             String       @id @default(uuid()) @db.Uuid
+  installationId String       @db.Uuid
+  licenseId      String?      @db.Uuid
+  type           EventType
+  description    String       @db.VarChar(500)
+  metadata       Json?
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Restrict)
+  license        License?     @relation(fields: [licenseId], references: [id], onDelete: Restrict)
+
+  @@index([installationId, createdAt])
+  @@index([licenseId])
+  @@index([type, createdAt])
+  @@index([createdAt, id])
+}
