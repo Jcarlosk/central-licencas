@@ -1,11 +1,11 @@
 import { loadEnv } from './config/env.js';
 import { createDatabase } from './repositories/database.js';
-import { loadSigningKeys } from './utils/signature.js';
+import { loadSigningKeysFromEnv } from './utils/signature.js';
 import { createApp } from './app.js';
 
 async function main() {
   const env = loadEnv();
-  const { privateKey } = loadSigningKeys(env.LICENSE_PRIVATE_KEY_PATH, env.LICENSE_PUBLIC_KEY_PATH);
+  const { privateKey } = loadSigningKeysFromEnv(env);
   const db = createDatabase(env.DATABASE_URL);
   await db.$connect();
   const server = createApp({ db, env, privateKey }).listen(env.PORT, () => console.log(`central-licencas listening on port ${env.PORT}`));

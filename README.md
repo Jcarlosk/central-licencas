@@ -25,8 +25,10 @@ Edite `.env` antes de iniciar. Nunca versione esse arquivo.
 | `DATABASE_URL` | `postgresql://USUARIO:SENHA@HOST:5432/central_licencas?schema=public` — substitua os marcadores e codifique caracteres especiais da senha na URL |
 | `JWT_SECRET` | Segredo aleatório com pelo menos 32 caracteres; gere 48 bytes aleatórios |
 | `JWT_EXPIRES_IN` | Ex.: `8h`; inteiro seguido de `s`, `m`, `h` ou `d` |
-| `LICENSE_PRIVATE_KEY_PATH` | `keys/license-private.pem` ou caminho absoluto |
-| `LICENSE_PUBLIC_KEY_PATH` | `keys/license-public.pem` ou caminho absoluto |
+| `LICENSE_PRIVATE_KEY_PATH` | `keys/license-private.pem` ou caminho absoluto; obrigatório somente sem o par Base64 |
+| `LICENSE_PUBLIC_KEY_PATH` | `keys/license-public.pem` ou caminho absoluto; obrigatório somente sem o par Base64 |
+| `LICENSE_PRIVATE_KEY_BASE64` | Base64 padrão dos bytes do PEM privado; opcional, configurar junto com o público |
+| `LICENSE_PUBLIC_KEY_BASE64` | Base64 padrão dos bytes do PEM público; opcional, configurar junto com o privado |
 | `RATE_LIMIT_MAX` | Requisições de API por IP/minuto, padrão `300` |
 | `VALIDATION_RATE_LIMIT_MAX` | Validações por IP/minuto, padrão `60` |
 | `LOGIN_RATE_LIMIT_MAX` | Tentativas de login por IP/minuto, padrão `10` |
@@ -62,6 +64,43 @@ npm run create-admin
 `generate-keys` gera um par Ed25519 real em `keys/license-private.pem` (PKCS#8) e `keys/license-public.pem` (SPKI). Recusa sobrescrever arquivos existentes. Nenhuma chave é fornecida pelo código. `.gitignore` bloqueia todos os PEMs e o conteúdo de `keys/`, exceto `.gitkeep`. O servidor confere tipo e correspondência das chaves ao iniciar.
 
 Restrinja a chave privada, `.env` e backups à conta do serviço. Em Linux, a chave privada é criada com modo `0600`; em Windows, configure a ACL NTFS para sua conta/conta de serviço, pois modos POSIX não substituem ACLs. Guarde backup seguro; não regenere uma chave em uso sem planejar a distribuição da nova chave pública. O futuro Electron receberá **somente a chave pública**.
+
+### Chaves por ambiente e Railway
+
+Quando **ambas** `LICENSE_PRIVATE_KEY_BASE64` e `LICENSE_PUBLIC_KEY_BASE64` estiverem preenchidas, o servidor decodifica os PEMs em memória e usa esse par, com prioridade sobre os caminhos. Não cria arquivos temporários. Valida Base64 padrão canônico (sem espaços/quebras de linha, com padding quando necessário), PEM, algoritmo Ed25519 e correspondência das chaves. Valores maiores que 16 KiB por variável são rejeitados. Falhas retornam apenas erro genérico, sem conteúdo das chaves.
+
+Se ambas estiverem ausentes ou vazias, o comportamento local permanece: carregar `LICENSE_PRIVATE_KEY_PATH` e `LICENSE_PUBLIC_KEY_PATH`. Se apenas uma Base64 estiver preenchida, ou o par for inválido, a inicialização falha; **não há fallback silencioso para arquivos**. Em produção é possível omitir completamente as duas variáveis `_PATH`. Base64 é uma codificação, não criptografia: proteja a variável privada como um segredo.
+
+Converta os PEMs existentes no PowerShell, sem imprimir chaves ou Base64:
+
+```powershell
+$privateKeyBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path 'keys/license-private.pem').Path))
+$publicKeyBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path 'keys/license-public.pem').Path))
+# Cole o conteúdo de cada variável na variável correspondente do Railway.
+# Set-Clipboard não imprime o valor; execute uma linha e cole antes da próxima.
+Set-Clipboard -Value $privateKeyBase64
+# Cole em LICENSE_PRIVATE_KEY_BASE64; depois:
+Set-Clipboard -Value $publicKeyBase64
+# Cole em LICENSE_PUBLIC_KEY_BASE64; depois limpe a sessão e a área de transferência:
+Set-Clipboard -Value ''
+Remove-Variable privateKeyBase64,publicKeyBase64
+```
+
+Não ative histórico/sincronização da área de transferência ao copiar segredos. Não use `Write-Output`, `echo`, logs ou arquivos versionados para esses valores. A conversão não gera novas chaves, preservando a chave pública distribuída.
+
+Nas Variables do **serviço da API** no Railway, configure:
+
+* `NODE_ENV=production`;
+* `DATABASE_URL`: referência à URL do serviço PostgreSQL exclusivo da central;
+* `JWT_SECRET`: segredo aleatório existente/gerado com pelo menos 32 caracteres;
+* `JWT_EXPIRES_IN=8h` (ou a duração que já utiliza);
+* `LICENSE_PRIVATE_KEY_BASE64` e `LICENSE_PUBLIC_KEY_BASE64`: conteúdo das variáveis PowerShell correspondentes;
+* `PORT`: pode usar o valor fornecido pelo Railway; o servidor já o lê;
+* opcionais: `RATE_LIMIT_MAX`, `VALIDATION_RATE_LIMIT_MAX`, `LOGIN_RATE_LIMIT_MAX` (padrões preservados).
+
+Não é necessário enviar PEMs, criar volume de chaves ou definir `_PATH`. Marque a chave privada e o JWT_SECRET como sealed quando apropriado. Veja a [documentação de variáveis do Railway](https://docs.railway.com/variables) e de [Node.js e PORT](https://railway.com/deploy/nodejs-1).
+
+Para a futura configuração do serviço (nenhum deploy é executado por este projeto): use a pasta `central-licencas` como raiz, Node 22.22.3+, Build Command `npm ci --include=dev && npm run prisma:generate && npm run build`, Pre-Deploy Command `npm run db:migrate`, Start Command `npm start` e health check `/health`. O build precisa das dependências de desenvolvimento para TypeScript e Prisma CLI. O comando de migration continua o mesmo e não reseta o banco. Consulte [Start Command](https://docs.railway.com/deployments/start-command). Não execute `generate-keys` ou seed automaticamente em produção.
 
 `create-admin` pergunta nome, email e senha com entrada oculta. Exige ao menos 12 caracteres e no máximo 72 bytes UTF-8 (limite do bcrypt), aplica bcrypt custo 12 e não imprime senha/hash. Email é normalizado para minúsculas. Para automação também aceita JSON `{ "name", "email", "password" }` pelo stdin, fornecido por um gerenciador de segredos; evite argumentos de linha de comando e arquivos de senha. Não há credenciais padrão.
 

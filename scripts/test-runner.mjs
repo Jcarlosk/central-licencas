@@ -43,6 +43,7 @@ try {
     ...process.env, NODE_ENV: 'test', DATABASE_URL: `postgresql://central_test:${password}@127.0.0.1:${port}/central_test`,
     JWT_SECRET: randomBytes(48).toString('base64url'), JWT_EXPIRES_IN: '8h',
     LICENSE_PRIVATE_KEY_PATH: privatePath, LICENSE_PUBLIC_KEY_PATH: publicPath,
+    LICENSE_PRIVATE_KEY_BASE64: '', LICENSE_PUBLIC_KEY_BASE64: '',
     CENTRAL_ISOLATED_TEST: 'true', RATE_LIMIT_MAX: '10000', LOGIN_RATE_LIMIT_MAX: '10000', VALIDATION_RATE_LIMIT_MAX: '10000',
   };
   if (await child(process.execPath, [resolve('node_modules/prisma/build/index.js'), 'migrate', 'deploy'], env) !== 0) throw new Error('MIGRATION_FAILED');
