@@ -23,6 +23,9 @@ afterEach(() => { vi.unstubAllEnvs(); });
 function setKeyEnv(values: Partial<Record<typeof fields[number], string>>) {
   for (const field of fields) vi.stubEnv(field, values[field] ?? '');
 }
+function unsetKeyEnv() {
+  for (const field of fields) vi.stubEnv(field, undefined);
+}
 
 describe('Base64 signing key loading', () => {
   it('loads real Ed25519 keys entirely in memory without paths and signs/verifies', () => {
@@ -78,6 +81,48 @@ describe('Base64 signing key loading', () => {
 });
 
 describe('Signing key environment validation', () => {
+  it('accepts a complete Base64 pair with PATH variables truly absent', () => {
+    unsetKeyEnv();
+    vi.stubEnv('LICENSE_PRIVATE_KEY_BASE64', encoded.LICENSE_PRIVATE_KEY_BASE64);
+    vi.stubEnv('LICENSE_PUBLIC_KEY_BASE64', encoded.LICENSE_PUBLIC_KEY_BASE64);
+    const env = loadEnv();
+    expect(env.LICENSE_PRIVATE_KEY_PATH === undefined && env.LICENSE_PUBLIC_KEY_PATH === undefined).toBe(true);
+    const loaded = loadSigningKeysFromEnv(env);
+    expect(verifyLicense(payload, signLicense(payload, loaded.privateKey), loaded.publicKey)).toBe(true);
+  });
+  it('accepts a complete PATH pair with Base64 variables truly absent', () => {
+    const privatePath = process.env.LICENSE_PRIVATE_KEY_PATH;
+    const publicPath = process.env.LICENSE_PUBLIC_KEY_PATH;
+    unsetKeyEnv();
+    vi.stubEnv('LICENSE_PRIVATE_KEY_PATH', privatePath);
+    vi.stubEnv('LICENSE_PUBLIC_KEY_PATH', publicPath);
+    const loaded = loadSigningKeysFromEnv(loadEnv());
+    expect(verifyLicense(payload, signLicense(payload, loaded.privateKey), loaded.publicKey)).toBe(true);
+  });
+  it.each([
+    ['LICENSE_PRIVATE_KEY_BASE64', 'LICENSE_PUBLIC_KEY_BASE64', encoded.LICENSE_PRIVATE_KEY_BASE64],
+    ['LICENSE_PUBLIC_KEY_BASE64', 'LICENSE_PRIVATE_KEY_BASE64', encoded.LICENSE_PUBLIC_KEY_BASE64],
+    ['LICENSE_PRIVATE_KEY_PATH', 'LICENSE_PUBLIC_KEY_PATH', 'keys/license-private.pem'],
+    ['LICENSE_PUBLIC_KEY_PATH', 'LICENSE_PRIVATE_KEY_PATH', 'keys/license-public.pem'],
+  ] as const)('rejects %s alone with a safe incomplete-pair error', (provided, missing, value) => {
+    unsetKeyEnv();
+    vi.stubEnv(provided, value);
+    expect(() => loadEnv()).toThrow(`Invalid environment fields: ${missing}`);
+  });
+  it('discards invalid PATHs before environment validation when Base64 is complete', () => {
+    setKeyEnv({ ...encoded, LICENSE_PRIVATE_KEY_PATH: 'nonexistent-invalid-private.pem', LICENSE_PUBLIC_KEY_PATH: 'nonexistent-invalid-public.pem' });
+    const env = loadEnv();
+    expect(env.LICENSE_PRIVATE_KEY_PATH === undefined && env.LICENSE_PUBLIC_KEY_PATH === undefined).toBe(true);
+    const loaded = loadSigningKeysFromEnv(env);
+    expect(verifyLicense(payload, signLicense(payload, loaded.privateKey), loaded.publicKey)).toBe(true);
+  });
+  it('Base64 takes priority even if only one PATH is present', () => {
+    setKeyEnv({ ...encoded, LICENSE_PRIVATE_KEY_PATH: 'nonexistent-private.pem' });
+    const env = loadEnv();
+    expect(env.LICENSE_PRIVATE_KEY_PATH === undefined && env.LICENSE_PUBLIC_KEY_PATH === undefined).toBe(true);
+    const loaded = loadSigningKeysFromEnv(env);
+    expect(verifyLicense(payload, signLicense(payload, loaded.privateKey), loaded.publicKey)).toBe(true);
+  });
   it('allows production with Base64 only and no paths', () => {
     vi.stubEnv('NODE_ENV', 'production');
     setKeyEnv(encoded);

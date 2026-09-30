@@ -54,7 +54,9 @@ describe('Safe startup diagnostics', () => {
   ] as const)('classifies ENV fields %j safely', (fields, code) => {
     const logs: string[] = [];
     logEnvValidationFailure(new EnvValidationError([...fields]), message => logs.push(message));
-    expect(logs).toEqual([code ? `[STARTUP] Signing key configuration failed: ${code}` : '[STARTUP] ENV validation failed']);
+    expect(logs).toEqual(code ? [`[STARTUP] Signing key configuration failed: ${code}`] : [
+      '[STARTUP] ENV validation failed', '[STARTUP] ENV invalid fields: JWT_SECRET, LICENSE_PRIVATE_KEY_PATH',
+    ]);
   });
   it('reports missing PEM files by private/public category without exposing paths', () => {
     for (const [privatePath, publicPath, code] of [
@@ -66,6 +68,12 @@ describe('Safe startup diagnostics', () => {
       catch (error) { if (error instanceof SigningKeyConfigurationError) actualCode = error.code; }
       expect(actualCode).toBe(code);
     }
+  });
+  it('reports only allowlisted invalid field names, ignoring arbitrary text', () => {
+    const secret = randomBytes(32).toString('hex');
+    const logs: string[] = [];
+    logEnvValidationFailure(new EnvValidationError(['JWT_EXPIRES_IN', secret]), message => logs.push(message));
+    expect(logs).toEqual(['[STARTUP] ENV validation failed', '[STARTUP] ENV invalid fields: JWT_EXPIRES_IN']);
   });
 });
 
@@ -94,6 +102,18 @@ function assertSafeFailure(result: { code: number | null; output: string }, mess
 }
 
 describe('Real server process startup failures', () => {
+  it.each([
+    ['LICENSE_PRIVATE_KEY_PATH', 'PUBLIC_KEY_MISSING'],
+    ['LICENSE_PUBLIC_KEY_PATH', 'PRIVATE_KEY_MISSING'],
+  ])('rejects %s alone when no Base64 is configured', async (field, code) => {
+    assertSafeFailure(await runStartup({ LICENSE_PRIVATE_KEY_BASE64: '', LICENSE_PUBLIC_KEY_BASE64: '', [field]: 'nonexistent-unused.pem' }), `[STARTUP] Signing key configuration failed: ${code}`);
+  });
+  it('identifies other invalid ENV fields without blaming absent PATHs in Base64 mode', async () => {
+    const result = await runStartup({ JWT_EXPIRES_IN: 'invalid-duration' });
+    assertSafeFailure(result, '[STARTUP] ENV validation failed', ['invalid-duration']);
+    expect(result.output.includes('[STARTUP] ENV invalid fields: JWT_EXPIRES_IN')).toBe(true);
+    expect(result.output.includes('Signing key configuration failed')).toBe(false);
+  });
   it('reports invalid ENV without printing its input', async () => {
     const secret = randomBytes(32).toString('hex');
     assertSafeFailure(await runStartup({ DATABASE_URL: secret }), '[STARTUP] ENV validation failed', [secret]);
@@ -122,5 +142,48 @@ describe('Real server process startup failures', () => {
     const password = randomBytes(24).toString('hex');
     const url = `postgresql://startup_test:${password}@127.0.0.1:${address.port}/startup_test?connect_timeout=1`;
     assertSafeFailure(await runStartup({ DATABASE_URL: url }), '[STARTUP] Database connection failed', [url, password]);
+  });
+});
+
+describe('Real server startup success using Base64', () => {
+  it.each(['absent', 'invalid'] as const)('starts with %s PATHs and responds to /health using real PostgreSQL', async paths => {
+    const listener = createServer();
+    await new Promise<void>((ready, reject) => { listener.once('error', reject); listener.listen(0, '127.0.0.1', ready); });
+    const address = listener.address();
+    if (!address || typeof address === 'string') throw new Error('Test port allocation failed');
+    const port = address.port;
+    await new Promise<void>((closed, reject) => listener.close(error => error ? reject(error) : closed()));
+    const child = spawn(process.execPath, ['--import', 'tsx', resolve('src/server.ts')], {
+      env: { ...process.env, NODE_ENV: 'production', PORT: String(port), ...validKeys,
+        LICENSE_PRIVATE_KEY_PATH: paths === 'absent' ? '' : 'nonexistent-invalid-private.pem',
+        LICENSE_PUBLIC_KEY_PATH: paths === 'absent' ? '' : 'nonexistent-invalid-public.pem',
+      }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    const stopped = new Promise<void>(done => child.once('exit', () => done()));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ready = new Promise<void>((resolveReady, reject) => {
+      timer = setTimeout(() => reject(new Error('Startup success test timeout')), 10000);
+      const read = (chunk: Buffer) => {
+        output += chunk.toString();
+        if (output.includes(`central-licencas listening on port ${port}`)) resolveReady();
+      };
+      child.stdout.on('data', read);
+      child.stderr.on('data', read);
+      child.once('error', () => reject(new Error('Startup success process failed')));
+      child.once('exit', () => reject(new Error('Startup success process exited before ready')));
+    });
+    try {
+      await ready;
+      const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(3000) });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ success: true, service: 'central-licencas' });
+      expect(output.includes('[STARTUP] ENV validation failed')).toBe(false);
+      expect([process.env.DATABASE_URL!, process.env.JWT_SECRET!, ...Object.values(validKeys)].some(secret => output.includes(secret))).toBe(false);
+    } finally {
+      if (timer) clearTimeout(timer);
+      child.kill();
+      await stopped;
+    }
   });
 });

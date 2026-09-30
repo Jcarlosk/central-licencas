@@ -3,6 +3,7 @@ import { SigningKeyConfigurationError } from '../utils/signature.js';
 
 type Logger = (message: string) => void;
 const keyFields = ['LICENSE_PRIVATE_KEY_BASE64', 'LICENSE_PUBLIC_KEY_BASE64', 'LICENSE_PRIVATE_KEY_PATH', 'LICENSE_PUBLIC_KEY_PATH'] as const;
+const envFields = ['NODE_ENV', 'PORT', 'DATABASE_URL', 'JWT_SECRET', 'JWT_EXPIRES_IN', 'RATE_LIMIT_MAX', 'VALIDATION_RATE_LIMIT_MAX', 'LOGIN_RATE_LIMIT_MAX', ...keyFields] as const;
 
 export function logStartupConfiguration(env: NodeJS.ProcessEnv = process.env, log: Logger = console.log) {
   const mode = env.NODE_ENV === undefined ? 'development'
@@ -22,6 +23,11 @@ export function logEnvValidationFailure(error: unknown, log: Logger = console.er
     return;
   }
   log('[STARTUP] ENV validation failed');
+  if (error instanceof EnvValidationError) {
+    // Names only, from a fixed allowlist: no values, messages or stack traces.
+    const fields = envFields.filter(field => error.fields.includes(field));
+    if (fields.length > 0) log(`[STARTUP] ENV invalid fields: ${fields.join(', ')}`);
+  }
 }
 
 export function logSigningKeyFailure(error: unknown, log: Logger = console.error) {

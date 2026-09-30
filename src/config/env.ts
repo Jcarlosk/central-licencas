@@ -2,7 +2,15 @@ import 'dotenv/config';
 import { z } from 'zod';
 
 const optionalKeySetting = z.preprocess(value => value === '' ? undefined : value, z.string().min(1).optional());
-const schema = z.object({
+const schema = z.preprocess(input => {
+  if (typeof input !== 'object' || input === null) return input;
+  const env = input as Record<string, unknown>;
+  const hasBase64 = (typeof env.LICENSE_PRIVATE_KEY_BASE64 === 'string' && env.LICENSE_PRIVATE_KEY_BASE64.length > 0)
+    || (typeof env.LICENSE_PUBLIC_KEY_BASE64 === 'string' && env.LICENSE_PUBLIC_KEY_BASE64.length > 0);
+  // Choose the source BEFORE validating fields. A Base64 configuration must
+  // never be rejected because of an unused PATH setting, even if it is invalid.
+  return hasBase64 ? { ...env, LICENSE_PRIVATE_KEY_PATH: undefined, LICENSE_PUBLIC_KEY_PATH: undefined } : input;
+}, z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   DATABASE_URL: z.string().url().refine(v => /^postgres(ql)?:/.test(v)),
@@ -23,7 +31,7 @@ const schema = z.object({
   for (const field of required) {
     if (!env[field]) ctx.addIssue({ code: 'custom', path: [field], message: 'Required signing key setting' });
   }
-});
+}));
 
 export type Env = z.infer<typeof schema>;
 export class EnvValidationError extends Error {
