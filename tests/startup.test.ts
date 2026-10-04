@@ -17,7 +17,7 @@ describe('Safe startup diagnostics', () => {
     const logs: string[] = [];
     logStartupConfiguration({ NODE_ENV: 'production', DATABASE_URL: secret, JWT_SECRET: secret, LICENSE_PRIVATE_KEY_BASE64: secret, LICENSE_PUBLIC_KEY_BASE64: secret, LICENSE_PRIVATE_KEY_PATH: secret }, message => logs.push(message));
     expect(logs).toEqual([
-      '[STARTUP] NODE_ENV: production', '[STARTUP] DATABASE_URL: configured', '[STARTUP] JWT_SECRET: configured',
+      '[STARTUP] NODE_ENV: production', '[STARTUP] DATABASE_URL: configured', '[STARTUP] DATABASE_URL scheme: invalid', '[STARTUP] JWT_SECRET: configured',
       '[STARTUP] LICENSE_PRIVATE_KEY_BASE64: configured', '[STARTUP] LICENSE_PUBLIC_KEY_BASE64: configured',
       '[STARTUP] LICENSE_PRIVATE_KEY_PATH: configured', '[STARTUP] LICENSE_PUBLIC_KEY_PATH: missing',
     ]);
@@ -30,7 +30,8 @@ describe('Safe startup diagnostics', () => {
     const logs: string[] = [];
     logStartupConfiguration({}, message => logs.push(message));
     expect(logs[0]).toBe('[STARTUP] NODE_ENV: development');
-    expect(logs.slice(1).every(line => line.endsWith(': missing'))).toBe(true);
+    expect(logs.includes('[STARTUP] DATABASE_URL scheme: invalid')).toBe(true);
+    expect(logs.slice(1).filter(line => !line.startsWith('[STARTUP] DATABASE_URL scheme:')).every(line => line.endsWith(': missing'))).toBe(true);
   });
   it('uses only allowlisted error categories, not arbitrary messages or stacks', () => {
     const secret = randomBytes(32).toString('hex');

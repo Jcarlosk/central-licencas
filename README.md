@@ -1,6 +1,8 @@
 # Central de Licenças
 
-API independente para administrar clientes, produtos, instalações e licenças. Não integra nem altera o `sistema-senhas`. Express, TypeScript, PostgreSQL, Prisma, Zod, bcrypt, JWT e assinatura assimétrica Ed25519. Não há frontend, pagamentos, seed automático ou administrador padrão.
+API independente para administrar clientes, produtos, instalações e licenças, com painel web administrativo em `/admin/` servido pela própria aplicação. Não integra nem altera o `sistema-senhas`. Express, TypeScript, PostgreSQL, Prisma, Zod, bcrypt, JWT e assinatura assimétrica Ed25519. Não há pagamentos, seed automático ou administrador padrão.
+
+Para usar o painel, execute `npm run dev` ou `npm run build` seguido de `npm start`, abra `/admin/` na URL da aplicação e entre com um administrador existente. Consulte [o relatório do painel](ADMIN-PANEL-REPORT.md) para funcionalidades, segurança, endpoints e resultados de validação. `npm run test:unit` executa os testes que não dependem de PostgreSQL; a suíte completa continua usando o banco isolado em Docker. Para excluir o teste que chama revoke, use `npm test -- --testNamePattern '^(?!.*REVOKED is permanent)'`.
 
 ## Requisitos e instalação
 

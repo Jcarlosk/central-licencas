@@ -1,4 +1,5 @@
 import express from 'express';
+import { fileURLToPath } from 'node:url';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import type { Context } from './types/context.js';
@@ -26,6 +27,8 @@ export function createApp(ctx: Context) {
   app.set('trust proxy', false);
   app.use(helmet());
   app.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
+  app.get('/', (_req, res) => { res.redirect('/admin/'); });
+  app.use('/admin', express.static(fileURLToPath(new URL('../public/admin/', import.meta.url)), { dotfiles: 'deny', index: 'index.html', fallthrough: true }));
   app.get('/health', (_req, res) => { res.json({ success: true, service: 'central-licencas' }); });
   app.use('/api', limiter(ctx.env.RATE_LIMIT_MAX));
   app.use('/api/v1/auth', limiter(ctx.env.LOGIN_RATE_LIMIT_MAX));

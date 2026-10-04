@@ -47,7 +47,7 @@ try {
     CENTRAL_ISOLATED_TEST: 'true', RATE_LIMIT_MAX: '10000', LOGIN_RATE_LIMIT_MAX: '10000', VALIDATION_RATE_LIMIT_MAX: '10000',
   };
   if (await child(process.execPath, [resolve('node_modules/prisma/build/index.js'), 'migrate', 'deploy'], env) !== 0) throw new Error('MIGRATION_FAILED');
-  process.exitCode = await child(process.execPath, [resolve('node_modules/vitest/vitest.mjs'), 'run'], env);
+  process.exitCode = await child(process.execPath, [resolve('node_modules/vitest/vitest.mjs'), 'run', ...process.argv.slice(2)], env);
 } catch (error) {
   const safe = new Set(['DOCKER_UNAVAILABLE', 'POSTGRES_START_FAILED', 'POSTGRES_NOT_READY', 'POSTGRES_PORT_UNAVAILABLE', 'MIGRATION_FAILED']);
   console.error(`Test setup failed: ${safe.has(error?.message) ? error.message : 'SETUP_ERROR'}. Start Docker Desktop and retry npm test.`);

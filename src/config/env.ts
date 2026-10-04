@@ -1,6 +1,19 @@
 import 'dotenv/config';
 import { z } from 'zod';
 
+export function databaseUrlScheme(value: unknown): 'postgresql' | 'postgres' | 'invalid' {
+  if (typeof value !== 'string' || value.length === 0 || /\s/.test(value) || !/^postgres(?:ql)?:\/\//i.test(value)) return 'invalid';
+  try {
+    const url = new URL(value);
+    if (!url.hostname || url.hash || /%(?![0-9a-f]{2})/i.test(value)) return 'invalid';
+    if (url.port && (Number(url.port) < 1 || Number(url.port) > 65535)) return 'invalid';
+    // Only return fixed protocol labels, never any other URL component.
+    if (url.protocol === 'postgresql:') return 'postgresql';
+    if (url.protocol === 'postgres:') return 'postgres';
+  } catch { /* Discard parser errors, which may contain the full input. */ }
+  return 'invalid';
+}
+
 const optionalKeySetting = z.preprocess(value => value === '' ? undefined : value, z.string().min(1).optional());
 const schema = z.preprocess(input => {
   if (typeof input !== 'object' || input === null) return input;
@@ -13,7 +26,7 @@ const schema = z.preprocess(input => {
 }, z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  DATABASE_URL: z.string().url().refine(v => /^postgres(ql)?:/.test(v)),
+  DATABASE_URL: z.string().min(1).refine(value => databaseUrlScheme(value) !== 'invalid'),
   JWT_SECRET: z.string().min(32),
   JWT_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/).default('8h'),
   LICENSE_PRIVATE_KEY_PATH: optionalKeySetting,

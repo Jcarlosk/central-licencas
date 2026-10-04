@@ -13,6 +13,7 @@ response.json
 # Dependências e build
 node_modules/
 dist/
+public/admin/vendor/
 coverage/
 
 # Logs

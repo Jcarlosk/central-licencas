@@ -1,4 +1,4 @@
-import { EnvValidationError } from './env.js';
+import { databaseUrlScheme, EnvValidationError } from './env.js';
 import { SigningKeyConfigurationError } from '../utils/signature.js';
 
 type Logger = (message: string) => void;
@@ -11,6 +11,7 @@ export function logStartupConfiguration(env: NodeJS.ProcessEnv = process.env, lo
   log(`[STARTUP] NODE_ENV: ${mode}`);
   for (const field of ['DATABASE_URL', 'JWT_SECRET', ...keyFields]) {
     log(`[STARTUP] ${field}: ${env[field] ? 'configured' : 'missing'}`);
+    if (field === 'DATABASE_URL') log(`[STARTUP] DATABASE_URL scheme: ${databaseUrlScheme(env.DATABASE_URL)}`);
   }
 }
 

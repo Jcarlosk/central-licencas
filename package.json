@@ -4,11 +4,14 @@
   "description": "Central independente de licenciamento online com PostgreSQL e Ed25519",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.22.3 <27" },
+  "engines": {
+    "node": ">=22.22.3 <27"
+  },
   "scripts": {
+    "predev": "node scripts/build-admin.mjs",
     "dev": "tsx watch src/server.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsc",
+    "build": "tsc && node scripts/build-admin.mjs",
     "start": "node dist/src/server.js",
     "prisma:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
@@ -16,12 +19,14 @@
     "generate-keys": "tsx scripts/generate-signing-keys.ts",
     "create-admin": "tsx scripts/create-admin.ts",
     "verify-license": "tsx scripts/verify-license.ts",
-    "test": "node scripts/test-runner.mjs"
+    "test": "node scripts/test-runner.mjs",
+    "test:unit": "node scripts/test-unit.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
     "@prisma/client": "6.12.0",
     "bcryptjs": "^3.0.3",
     "dotenv": "^18.0.5",
@@ -29,13 +34,16 @@
     "express-rate-limit": "^8.7.0",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
+    "lucide": "1.49.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
+    "@types/jsdom": "30.0.0",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.6.3",
     "@types/supertest": "^7.2.1",
+    "jsdom": "30.1.1",
     "prisma": "6.12.0",
     "supertest": "^7.3.0",
     "tsx": "^4.23.15",
