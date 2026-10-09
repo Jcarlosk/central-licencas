@@ -13,7 +13,7 @@ export const installationCreate = z.object({
   installationId: z.string().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/).optional(),
   active: z.boolean().optional(),
 }).strict();
-export const installationPatch = z.object({ name: name.optional(), active: z.boolean().optional() }).strict().refine(v => Object.keys(v).length > 0);
+export const installationPatch = z.object({ name: name.optional(), active: z.boolean().optional(), updateChannel: z.enum(['stable', 'beta']).optional() }).strict().refine(v => Object.keys(v).length > 0);
 export const clientPatch = clientCreate.partial().refine(v => Object.keys(v).length > 0);
 export const productPatch = productCreate.partial().refine(v => Object.keys(v).length > 0);
 export const daysSchema = z.object({ days: z.number().int().min(1).max(3650), graceDays: z.number().int().min(0).max(365).default(5) }).strict();

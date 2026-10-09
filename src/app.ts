@@ -12,6 +12,7 @@ import { installationsRoutes } from './routes/installations.routes.js';
 import { licensesRoutes } from './routes/licenses.routes.js';
 import { eventsRoutes } from './routes/events.routes.js';
 import { publicLicenseRoutes } from './routes/public-license.routes.js';
+import { publicUpdatesRoutes, updatesRoutes } from './routes/updates.routes.js';
 function limiter(max: number) {
   return rateLimit({
     windowMs: 60_000, limit: max, standardHeaders: 'draft-8', legacyHeaders: false,
@@ -33,9 +34,11 @@ export function createApp(ctx: Context) {
   app.use('/api', limiter(ctx.env.RATE_LIMIT_MAX));
   app.use('/api/v1/auth', limiter(ctx.env.LOGIN_RATE_LIMIT_MAX));
   app.use('/api/v1/license', limiter(ctx.env.VALIDATION_RATE_LIMIT_MAX));
+  app.use('/api/v1/updates/check', limiter(ctx.env.VALIDATION_RATE_LIMIT_MAX));
   app.use(express.json({ limit: '16kb', strict: true }));
   app.use('/api/v1/auth', authRoutes(ctx));
   app.use('/api/v1/license', publicLicenseRoutes(ctx));
+  app.use('/api/v1/updates', publicUpdatesRoutes(ctx));
   const admin = express.Router();
   admin.use(requireAdmin(ctx));
   admin.use('/clients', clientsRoutes(ctx));
@@ -43,6 +46,7 @@ export function createApp(ctx: Context) {
   admin.use('/installations', installationsRoutes(ctx));
   admin.use('/licenses', licensesRoutes(ctx));
   admin.use('/events', eventsRoutes(ctx));
+  admin.use('/updates', updatesRoutes(ctx));
   app.use('/api/v1', admin);
   app.use((_req, res) => { res.status(404).json({ success: false, error: 'NOT_FOUND' }); });
   app.use(errorHandler);

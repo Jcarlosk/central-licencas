@@ -5,6 +5,8 @@
   const notice = document.querySelector('#notice');
   const sections = { dashboard: ['Dashboard', 'Visão geral da sua central de licenciamento', 'layout-dashboard'], clients: ['Clientes', 'Clientes cadastrados na central', 'users'], installations: ['Instalações', 'Instalações e suas últimas validações', 'monitor'], licenses: ['Licenças', 'Validade, tolerância e gestão administrativa', 'key-round'], events: ['Auditoria', 'Histórico de operações e validações', 'history'] };
   const statuses = ['ACTIVE', 'GRACE', 'SUSPENDED', 'EXPIRED', 'REVOKED'];
+  sections.updates = ['Atualizações', 'Controle das versões por produto • modo de teste', 'download'];
+  let releases = [], updateProduct = '';
   const eventTypes = ['INSTALLATION_CREATED', 'LICENSE_CREATED', 'LICENSE_RENEWED', 'LICENSE_SUSPENDED', 'LICENSE_REACTIVATED', 'LICENSE_REVOKED', 'LICENSE_VALIDATED'];
   let token = '', session = 0, generation = 0, expiryTimer, toastTimer, statusTimer;
   let view = 'dashboard', query = '', filter = '', page = 1, busy = false;
@@ -20,6 +22,7 @@
   const clientName = item => lookup('clients', item?.clientId)?.name ?? '—';
   const productName = item => lookup('products', item?.productId)?.name ?? '—';
   const errors = { INVALID_CREDENTIALS: 'E-mail ou senha inválidos.', UNAUTHORIZED: 'Sua sessão expirou. Entre novamente.', RATE_LIMITED: 'Muitas solicitações. Aguarde um minuto e tente novamente.', VALIDATION_ERROR: 'Confira os campos e os limites informados.', CONFLICT: 'Este registro já existe ou a instalação já possui licença.', INVALID_RELATION: 'Cliente, produto ou instalação não encontrado.', INACTIVE_ENTITY: 'A instalação, cliente e produto precisam estar habilitados.', LICENSE_REVOKED: 'Licenças revogadas não permitem alterações.', ALREADY_SUSPENDED: 'Esta licença já está suspensa.', LICENSE_NOT_SUSPENDED: 'Esta licença não está suspensa.', NOT_FOUND: 'Registro não encontrado.', RETRY_OPERATION: 'Houve uma operação concorrente. Atualize e tente novamente.' };
+  Object.assign(errors, { PRODUCT_NOT_FOUND: 'Produto não encontrado.', PRODUCT_MISMATCH: 'Produto não corresponde ao registro.', RELEASE_NOT_EDITABLE: 'Esta release não pode ser editada.', INVALID_RELEASE_STATE: 'O estado da release não permite esta ação.', RELEASE_CHANGED: 'A release mudou durante a operação. Atualize e tente novamente.', INVALID_FILE_COUNT: 'Envie exatamente instalador, latest.yml e blockmap.', INVALID_FILE_NAME: 'Nome de arquivo inválido.', INVALID_FILE_EXTENSION: 'Extensão de arquivo inválida.', INVALID_FILE_MIME: 'Tipo de arquivo inválido.', INVALID_INSTALLER: 'Instalador inválido: cabeçalho MZ ausente.', INVALID_UPDATE_METADATA: 'latest.yml não corresponde ao instalador e à versão.', BLOCKMAP_MISMATCH: 'O nome do blockmap deve ser o nome do instalador seguido de .blockmap.', FILE_TOO_LARGE: 'Arquivo vazio ou acima do limite permitido.', INVALID_UPLOAD: 'Upload incompleto ou inválido.' });
   function effectiveStatus(license, now = Date.now()) {
     if (license.status === 'REVOKED') return 'REVOKED';
     const item = installation(license.installationId);
@@ -32,13 +35,15 @@
   function toast(message) { notice.textContent = message; clearTimeout(toastTimer); toastTimer = setTimeout(() => { notice.textContent = ''; }, 6000); }
   function closeModal() { modal.close(); modal.replaceChildren(); }
   function logout(message = '') {
+    releases = []; updateProduct = '';
     token = ''; session++; generation++; clearTimeout(expiryTimer); clearInterval(statusTimer);
     cache = { clients: [], products: [], installations: [], licenses: [] }; events = []; eventFilters = {}; eventTotal = 0;
     query = ''; filter = ''; page = 1; view = 'dashboard'; busy = false; closeModal(); login(message);
   }
-  async function api(path, body, signal) {
+  async function api(path, body, signal, method) {
     const current = session;
-    const response = await fetch(`/api/v1/${path}`, { method: body === undefined ? 'GET' : 'POST', credentials: 'omit', cache: 'no-store', signal, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    const multipart = body instanceof FormData;
+    const response = await fetch(`/api/v1/${path}`, { method: method || (body === undefined ? 'GET' : 'POST'), credentials: 'omit', cache: 'no-store', signal, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body !== undefined && !multipart ? { 'Content-Type': 'application/json' } : {}) }, ...(body !== undefined ? { body: multipart ? body : JSON.stringify(body) } : {}) });
     if (current !== session) throw new Error('Sessão encerrada.');
     if (response.status === 401 && token) { logout('Sua sessão expirou. Entre novamente.'); throw new Error(errors.UNAUTHORIZED); }
     const result = await response.json().catch(() => null);
@@ -78,13 +83,13 @@
     root.querySelector('#logout').onclick = () => logout();
     root.querySelector('#menu').onclick = event => { const open = root.querySelector('.shell').classList.toggle('open'); event.currentTarget.setAttribute('aria-expanded', String(open)); };
     root.querySelector('#refresh').onclick = () => load();
-    root.querySelector('#create').onclick = () => formModal(view === 'installations' ? 'installation' : 'license');
+    root.querySelector('#create').onclick = () => view === 'updates' ? updateForm() : formModal(view === 'installations' ? 'installation' : 'license');
     root.querySelectorAll('[data-view]').forEach(button => { button.onclick = () => {
       const wasBusy = busy;
       closeModal(); generation++; busy = false; root.querySelector('#refresh').disabled = false;
       view = button.dataset.view; query = ''; filter = ''; page = 1;
       root.querySelector('.shell').classList.remove('open'); root.querySelector('#menu').setAttribute('aria-expanded', 'false');
-      content(); if (view === 'events' || wasBusy) load();
+      content(); if (['events', 'updates'].includes(view) || wasBusy) load();
     }; });
     content();
   }
@@ -105,6 +110,7 @@
         for (const kind of Object.keys(cache)) result[kind] = await all(kind);
         if (current !== generation || !token) return;
         cache = result;
+        if (view === 'updates') { const items = await all('updates'); if (current !== generation || !token) return; releases = items; }
       }
       content();
     } catch (err) {
@@ -126,9 +132,11 @@
     if (!token) return;
     root.querySelector('#title').textContent = sections[view][0]; root.querySelector('#subtitle').textContent = sections[view][1];
     root.querySelectorAll('[data-view]').forEach(b => { b.classList.toggle('selected', b.dataset.view === view); if (b.dataset.view === view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-    const create = root.querySelector('#create'); create.hidden = !['installations', 'licenses'].includes(view); create.innerHTML = `${icon('plus')} ${view === 'installations' ? 'Nova instalação' : 'Nova licença'}`;
+    const create = root.querySelector('#create'); create.hidden = !['installations', 'licenses', 'updates'].includes(view); create.innerHTML = `${icon('plus')} ${view === 'updates' ? 'Publicar nova versão' : view === 'installations' ? 'Nova instalação' : 'Nova licença'}`;
     const area = root.querySelector('#content');
-    if (view === 'dashboard') {
+    if (view === 'updates') {
+      updatesContent(area);
+    } else if (view === 'dashboard') {
       const active = cache.licenses.filter(l => effectiveStatus(l) === 'ACTIVE').length;
       area.innerHTML = `<div class="stats">${[['Clientes', cache.clients.length, 'users'], ['Instalações', cache.installations.length, 'monitor'], ['Licenças', cache.licenses.length, 'key-round'], ['Licenças ativas', active, 'circle-check']].map(([label, value, name]) => `<div class="card"><div class="stat-label">${label}${icon(name)}</div><div class="metric">${value}</div><small>Base administrativa</small></div>`).join('')}</div><div class="card"><h2>Distribuição das licenças</h2><div class="statuses">${statuses.map(s => `<button data-status="${s}">${badge(s)} <strong>${cache.licenses.filter(l => effectiveStatus(l) === s).length}</strong></button>`).join('')}</div><small>Status estimado pelas datas e cadastros habilitados. A validação assinada é emitida pela API.</small></div><div class="card" style="margin-top:20px"><h2>Licenças com vencimento próximo</h2>${table(headings.licenses, cache.licenses.filter(l => ['ACTIVE', 'GRACE'].includes(effectiveStatus(l)) && Date.parse(l.expiresAt) <= Date.now() + 7 * 86400000).sort((a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt)).slice(0, 8).map(l => row('licenses', l)))}</div>`;
       area.querySelectorAll('[data-status]').forEach(b => { b.onclick = () => { view = 'licenses'; filter = b.dataset.status; page = 1; content(); }; });
@@ -151,6 +159,74 @@
     bindRows(); icons();
   }
   function pager(total, limit) { const pages = Math.max(1, Math.ceil(total / limit)); return `<div class="pagination"><small>${total} registro(s) • Página ${page} de ${pages}</small><div><button data-page="-1" ${page <= 1 ? 'disabled' : ''}>Anterior</button><button data-page="1" ${page >= pages ? 'disabled' : ''}>Próxima</button></div></div>`; }
+  function compareVersions(a, b) {
+    const split = v => { const [main, pre] = v.split('-'); return [main.split('.').map(Number), pre?.split('.')]; };
+    const [am, ap] = split(a), [bm, bp] = split(b);
+    for (let i = 0; i < 3; i++) if (am[i] !== bm[i]) return am[i] - bm[i];
+    if (!ap || !bp) return ap ? -1 : bp ? 1 : 0;
+    for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
+      if (ap[i] === undefined || bp[i] === undefined) return ap[i] === undefined ? -1 : 1;
+      if (ap[i] === bp[i]) continue;
+      const an = /^\d+$/.test(ap[i]), bn = /^\d+$/.test(bp[i]);
+      if (an && bn) return BigInt(ap[i]) < BigInt(bp[i]) ? -1 : 1;
+      if (an !== bn) return an ? -1 : 1;
+      return ap[i] < bp[i] ? -1 : 1;
+    }
+    return 0;
+  }
+  function updatesContent(area) {
+    if (!cache.products.some(p => p.id === updateProduct)) updateProduct = cache.products.find(p => p.code === 'sistema-atendimento')?.id || cache.products[0]?.id || '';
+    const items = releases.filter(r => r.productId === updateProduct);
+    const latest = channel => items.filter(r => r.channel === channel && r.status === 'PUBLISHED' && !r.dryRun).sort((a, b) => compareVersions(b.version, a.version))[0];
+    const published = items.filter(r => r.publishedAt).sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))[0];
+    area.innerHTML = `<div class="card"><label for="update-product">Produto</label><select id="update-product">${options(cache.products, p => p.name)}</select><p class="info">DRY-RUN: valida arquivos e simula a publicação. Nenhuma versão de teste é distribuída.</p><div class="stats">${[['Versão estável', latest('stable')?.version || '—'], ['Versão beta', latest('beta')?.version || '—'], ['Última publicação', date(published?.publishedAt)]].map(([label, value]) => `<div><small>${e(label)}</small><p><strong>${e(value)}</strong></p></div>`).join('')}</div><h2>Histórico de versões</h2>${table(['Versão', 'Canal', 'Status', 'Publicada em', 'Tipo', 'Ações'], items.map(r => `<tr><td>${e(r.version)}<small>${e(r.title)}</small>${r.sha256 ? `<small>SHA-256: ${e(r.sha256)}</small>` : ''}</td><td>${e(r.channel)}</td><td>${badge(r.status)}<small>${r.dryRun ? 'Teste / dry-run' : ''}</small></td><td>${date(r.publishedAt)}</td><td>${r.mandatory ? 'Obrigatória' : 'Opcional'}</td><td>${r.status === 'DRAFT' ? `<button data-edit-update="${e(r.id)}">Editar / simular</button>` : ''}${r.status !== 'DISABLED' ? `<button data-disable-update="${e(r.id)}">Desabilitar distribuição</button>` : ''}</td></tr>`))}</div><div class="card" style="margin-top:20px"><h2>Instalações e canais</h2>${table(['Instalação', 'Cliente', 'Canal permitido', 'Versão informada', 'Último check', 'Ações'], cache.installations.filter(i => i.productId === updateProduct).map(i => `<tr><td>${e(i.name)}</td><td>${e(clientName(i))}</td><td>${e(i.updateChannel || 'stable')}</td><td>${e(i.reportedVersion || '—')}</td><td>${date(i.lastUpdateCheckAt)}</td><td><button data-channel-installation="${e(i.id)}" data-channel="${i.updateChannel === 'beta' ? 'stable' : 'beta'}">${i.updateChannel === 'beta' ? 'Usar stable' : 'Habilitar beta'}</button></td></tr>`))}</div>`;
+    area.querySelector('#update-product').value = updateProduct;
+    area.querySelector('#update-product').onchange = event => { updateProduct = event.target.value; content(); };
+    area.querySelectorAll('[data-edit-update]').forEach(b => { b.onclick = () => updateForm(releases.find(r => r.id === b.dataset.editUpdate)); });
+    area.querySelectorAll('[data-disable-update], [data-channel-installation]').forEach(b => { b.onclick = async () => {
+      b.disabled = true;
+      try {
+        if (b.dataset.disableUpdate) await api(`updates/${b.dataset.disableUpdate}/disable`, {});
+        else await api(`installations/${b.dataset.channelInstallation}`, { updateChannel: b.dataset.channel }, undefined, 'PATCH');
+        await load();
+      } catch (err) { toast(err.message); } finally { if (b.isConnected) b.disabled = false; }
+    }; });
+  }
+  function updateForm(item) {
+    if (busy) { toast('Aguarde a atualização dos dados.'); return; }
+    showModal('Publicar atualização', `<form id="update-form"><label for="release-product">Produto</label><select id="release-product" name="productId" required>${options(cache.products.filter(p => p.active), p => p.name)}</select><label for="release-version">Versão (SemVer)</label><input id="release-version" name="version" placeholder="1.0.1" maxlength="100" required><label for="release-channel">Canal</label><select id="release-channel" name="channel"><option value="stable">Estável</option><option value="beta">Beta</option></select><label for="release-mandatory">Tipo</label><select id="release-mandatory" name="mandatory"><option value="false">Opcional</option><option value="true">Obrigatória</option></select><label for="release-title">Título</label><input id="release-title" name="title" maxlength="200" required><label for="release-notes">Notas da versão</label><textarea id="release-notes" name="notes" maxlength="10000"></textarea><label for="release-installer">Setup.exe (até 250 MiB)</label><input id="release-installer" name="installer" type="file" accept=".exe"><label for="release-metadata">latest.yml (até 64 KiB)</label><input id="release-metadata" name="metadata" type="file" accept=".yml"><label for="release-blockmap">Setup.exe.blockmap (até 10 MiB)</label><input id="release-blockmap" name="blockmap" type="file" accept=".blockmap"><p class="info">O latest.yml deve corresponder à versão, nome, tamanho e SHA-512 do instalador. Arquivos são temporários e precisam ser reenviados em cada simulação.</p><p class="error" role="alert"></p><div class="dialog-actions"><button type="button" data-close>Cancelar</button><button type="submit" name="intent" value="draft">Salvar draft</button><button class="primary" type="submit" name="intent" value="publish">Publicar (dry-run)</button></div></form>`);
+    const form = modal.querySelector('form');
+    form.elements.productId.value = item?.productId || updateProduct;
+    if (item) for (const key of ['version', 'channel', 'mandatory', 'title', 'notes']) form.elements[key].value = String(item[key]);
+    if (item) form.elements.productId.disabled = true;
+    let draftId = item?.id, submitting = false;
+    const currentSession = session;
+    form.onsubmit = async event => {
+      event.preventDefault(); if (submitting) return;
+      const publish = event.submitter?.value === 'publish';
+      const body = Object.fromEntries(['productId', 'version', 'channel', 'title', 'notes'].map(k => [k, form.elements[k].value]));
+      body.mandatory = form.elements.mandatory.value === 'true';
+      const files = new FormData();
+      if (publish) for (const key of ['installer', 'metadata', 'blockmap']) {
+        const file = form.elements[key].files[0];
+        if (!file) { form.querySelector('.error').textContent = 'Selecione os três arquivos para simular a publicação.'; return; }
+        files.append(key, file);
+      }
+      submitting = true; form.querySelectorAll('button').forEach(b => { b.disabled = true; });
+      const preventClose = event => event.preventDefault(); modal.addEventListener('cancel', preventClose);
+      modal.querySelector('.dialog-top button').disabled = true;
+      try {
+        const result = await api(draftId ? `updates/${draftId}` : 'updates', body, undefined, draftId ? 'PATCH' : 'POST');
+        if (session !== currentSession || !token) return;
+        draftId = result.data.id;
+        form.elements.productId.disabled = true;
+        if (publish) await api(`updates/${draftId}/publish`, files);
+        if (session !== currentSession || !token) return;
+        closeModal(); toast(publish ? 'Simulação concluída. Release permanece DRAFT e não é distribuída.' : 'Draft salvo.'); await load();
+      } catch (err) { if (form.isConnected) form.querySelector('.error').textContent = `${draftId ? 'Draft salvo. ' : ''}${err.message}`; }
+      finally { submitting = false; modal.removeEventListener('cancel', preventClose); if (form.isConnected) { form.querySelectorAll('button').forEach(b => { b.disabled = false; }); modal.querySelector('.dialog-top button').disabled = false; } }
+    };
+  }
   function results() {
     const text = query.toLocaleLowerCase('pt-BR');
     const items = cache[view].filter(item => {
