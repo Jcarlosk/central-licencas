@@ -1,4 +1,5 @@
 import semver from 'semver';
+import { z } from 'zod';
 import type { UpdateRelease } from '@prisma/client';
 import type { Context } from '../types/context.js';
 import type { UpdateCheckInput, UpdateCheckResponse } from '../utils/update-schemas.js';
@@ -13,6 +14,22 @@ export function selectUpdate(releases: UpdateRelease[], currentVersion: string, 
     r.installerUrl?.startsWith('https://') && r.sha256 && /^[a-f0-9]{64}$/.test(r.sha256) &&
     semver.valid(r.version) && (channel !== 'stable' || !semver.prerelease(r.version)) && semver.gt(r.version, currentVersion))
     .sort((a, b) => semver.rcompare(a.version, b.version))[0];
+}
+// Existing JSON summary can hold installer metadata without a schema migration.
+// Legacy summaries do not persist SHA-512 and must not produce an incomplete update.
+export function updateResponse(release: UpdateRelease): UpdateCheckResponse {
+  const summary = z.object({ assets: z.array(z.object({
+    kind: z.string(), name: z.string(), size: z.number(), sha512: z.string().optional(),
+  })) }).safeParse(release.publicationLog);
+  const installer = summary.success ? summary.data.assets.find(asset => asset.kind === 'installer') : undefined;
+  if (!installer || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,159}\.exe$/i.test(installer.name) || installer.name.includes('..') ||
+    !Number.isSafeInteger(installer.size) || installer.size <= 0 ||
+    !installer.sha512 || !/^[A-Za-z0-9+/]{86}==$/.test(installer.sha512)) {
+    throw new ApiError(503, 'UPDATE_METADATA_UNAVAILABLE');
+  }
+  return { updateAvailable: true, version: release.version, channel: release.channel, mandatory: release.mandatory,
+    title: release.title, notes: release.notes, downloadUrl: release.installerUrl!, sha256: release.sha256!,
+    sha512: installer.sha512, size: installer.size, fileName: installer.name };
 }
 export async function checkUpdates(ctx: Context, input: UpdateCheckInput): Promise<UpdateCheckResponse> {
   // Reuses credentials, policy, signature and licensing audit, without a new secret.
@@ -34,7 +51,6 @@ export async function checkUpdates(ctx: Context, input: UpdateCheckInput): Promi
     if (input.channel === 'beta' && installation.updateChannel !== 'beta') throw new ApiError(403, 'UPDATE_CHANNEL_NOT_ALLOWED');
     await tx.installation.update({ where: { id: installation.id }, data: { reportedVersion: input.currentVersion, lastUpdateCheckAt: new Date() } });
     const release = selectUpdate(await tx.updateRelease.findMany({ where: { productId: installation.productId, channel: input.channel, status: 'PUBLISHED', dryRun: false } }), input.currentVersion, input.channel);
-    return release ? { updateAvailable: true, version: release.version, channel: release.channel, mandatory: release.mandatory,
-      title: release.title, notes: release.notes, downloadUrl: release.installerUrl!, sha256: release.sha256! } : { updateAvailable: false };
+    return release ? updateResponse(release) : { updateAvailable: false };
   });
 }

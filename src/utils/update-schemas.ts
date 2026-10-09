@@ -10,10 +10,11 @@ export const releaseBody = z.object({
 }).strict().refine(v => v.channel !== 'stable' || !semver.prerelease(v.version), 'Stable não aceita prerelease');
 export const checkBody = validationBody.extend({
   product: z.string().min(1).max(100), currentVersion: versionSchema, channel: channelSchema,
+  platform: z.string().min(1).max(50), arch: z.string().min(1).max(50),
 }).strict();
 export type ReleaseInput = z.infer<typeof releaseBody>;
 export type UpdateCheckInput = z.infer<typeof checkBody>;
 export type UpdateCheckResponse = { updateAvailable: false } | {
   updateAvailable: true; version: string; channel: 'stable' | 'beta'; mandatory: boolean;
-  title: string; notes: string; downloadUrl: string; sha256: string;
+  title: string; notes: string; downloadUrl: string; sha256: string; sha512: string; size: number; fileName: string;
 };
