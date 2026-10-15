@@ -15,7 +15,7 @@
   const e = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const icon = name => `<i data-lucide="${name}" aria-hidden="true"></i>`;
   const icons = () => window.lucide?.createIcons();
-  const date = value => value ? new Date(value).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '—';
+  const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '—';
   const badge = status => `<span class="badge ${e(status)}">${e(status)}</span>`;
   const lookup = (kind, id) => cache[kind].find(item => item.id === id);
   const installation = id => lookup('installations', id);
@@ -23,14 +23,15 @@
   const productName = item => lookup('products', item?.productId)?.name ?? '—';
   const errors = { INVALID_CREDENTIALS: 'E-mail ou senha inválidos.', UNAUTHORIZED: 'Sua sessão expirou. Entre novamente.', RATE_LIMITED: 'Muitas solicitações. Aguarde um minuto e tente novamente.', VALIDATION_ERROR: 'Confira os campos e os limites informados.', CONFLICT: 'Este registro já existe ou a instalação já possui licença.', INVALID_RELATION: 'Cliente, produto ou instalação não encontrado.', INACTIVE_ENTITY: 'A instalação, cliente e produto precisam estar habilitados.', LICENSE_REVOKED: 'Licenças revogadas não permitem alterações.', ALREADY_SUSPENDED: 'Esta licença já está suspensa.', LICENSE_NOT_SUSPENDED: 'Esta licença não está suspensa.', NOT_FOUND: 'Registro não encontrado.', RETRY_OPERATION: 'Houve uma operação concorrente. Atualize e tente novamente.' };
   Object.assign(errors, { PRODUCT_NOT_FOUND: 'Produto não encontrado.', PRODUCT_MISMATCH: 'Produto não corresponde ao registro.', RELEASE_NOT_EDITABLE: 'Esta release não pode ser editada.', INVALID_RELEASE_STATE: 'O estado da release não permite esta ação.', RELEASE_CHANGED: 'A release mudou durante a operação. Atualize e tente novamente.', INVALID_FILE_COUNT: 'Envie exatamente instalador, latest.yml e blockmap.', INVALID_FILE_NAME: 'Nome de arquivo inválido.', INVALID_FILE_EXTENSION: 'Extensão de arquivo inválida.', INVALID_FILE_MIME: 'Tipo de arquivo inválido.', INVALID_INSTALLER: 'Instalador inválido: cabeçalho MZ ausente.', INVALID_UPDATE_METADATA: 'latest.yml não corresponde ao instalador e à versão.', BLOCKMAP_MISMATCH: 'O nome do blockmap deve ser o nome do instalador seguido de .blockmap.', FILE_TOO_LARGE: 'Arquivo vazio ou acima do limite permitido.', INVALID_UPLOAD: 'Upload incompleto ou inválido.' });
-  function effectiveStatus(license, now = Date.now()) {
-    if (license.status === 'REVOKED') return 'REVOKED';
-    const item = installation(license.installationId);
-    if (license.status === 'SUSPENDED' || item?.active === false || lookup('clients', item?.clientId)?.active === false || lookup('products', item?.productId)?.active === false) return 'SUSPENDED';
-    if (now < Date.parse(license.startsAt)) return 'EXPIRED';
-    if (now <= Date.parse(license.expiresAt)) return 'ACTIVE';
-    if (now <= Date.parse(license.graceUntil)) return 'GRACE';
-    return 'EXPIRED';
+  const state = l => l?.adminState ?? { status: 'UNKNOWN', nivel: 'UNKNOWN', label: 'Sem licença' };
+  const effectiveStatus = l => state(l).status;
+  const labels = { ACTIVE: 'Ativas', SOON: 'Vencem em breve', TODAY: 'Vencem hoje', GRACE: 'Em carência', CRITICAL: 'Últimos 3 dias de carência', SUSPENDED: 'Suspensas', REVOKED: 'Revogadas', EXPIRED: 'Expiradas' };
+  const licenseFor = item => view === 'installations' ? cache.licenses.find(l => l.installationId === item.id) : item;
+  const matches = (l, f) => !f || (f === 'SOON' ? ['SOON', 'TODAY'].includes(state(l).nivel) : ['TODAY', 'CRITICAL'].includes(f) ? state(l).nivel === f : effectiveStatus(l) === f);
+  const deadline = l => `<span class="badge ${e(state(l).nivel)}">${e(state(l).label)}</span>`;
+  let ordering = 'expiresAt';
+  function summary() {
+    return `<div class="stats">${[['ACTIVE', 'Licenças ativas'], ['SOON', 'Vencem nos próximos 7 dias'], ['GRACE', 'Em carência'], ['SUSPENDED', 'Suspensas']].map(([key, label]) => `<button class="card summary-card" data-summary="${key}"><span class="stat-label">${label}</span><strong class="metric">${cache.licenses.filter(l => matches(l, key)).length}</strong></button>`).join('')}</div>`;
   }
   function toast(message) { notice.textContent = message; clearTimeout(toastTimer); toastTimer = setTimeout(() => { notice.textContent = ''; }, 6000); }
   function closeModal() { modal.close(); modal.replaceChildren(); }
@@ -73,7 +74,7 @@
         const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
         expiryTimer = setTimeout(() => logout('Sua sessão expirou. Entre novamente.'), Math.max(0, payload.exp * 1000 - Date.now()));
         shell(); await load();
-        statusTimer = setInterval(() => { if (token && !modal.open && !busy) { if (view === 'dashboard') content(); else if (view === 'licenses') results(); } }, 60000);
+        statusTimer = setInterval(() => { if (token && !modal.open && !busy) { if (['dashboard', 'licenses', 'installations'].includes(view)) load(); } }, 60000);
       } catch (err) { error.textContent = err.message; }
       finally { button.disabled = false; }
     });
@@ -122,12 +123,15 @@
   function table(headings, rows) { return `<div class="table-wrap"><table><thead><tr>${headings.map(x => `<th scope="col">${x}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headings.length}" class="empty">Nenhum registro encontrado.</td></tr>`}</tbody></table></div>`; }
   function row(kind, item) {
     if (kind === 'clients') return `<tr><td>${e(item.name)}<small>${e(item.id)}</small></td><td>${e(item.document || '—')}</td><td>${e(item.email || '—')}<small>${e(item.phone || '')}</small></td><td>${badge(item.active ? 'ACTIVE' : 'SUSPENDED')}</td><td>${cache.installations.filter(i => i.clientId === item.id).length}</td></tr>`;
-    if (kind === 'installations') return `<tr><td>${e(item.name)}<small>${e(item.installationId)}</small></td><td>${e(clientName(item))}</td><td>${e(productName(item))}</td><td>${badge(item.active ? 'ACTIVE' : 'SUSPENDED')}</td><td>${date(item.lastValidationAt)}<small>${e(item.lastValidationStatus || 'Sem validação')}</small></td><td><button data-audit="${e(item.id)}">${icon('history')} Auditoria</button></td></tr>`;
+    if (kind === 'installations') return monitoringRow(item, cache.licenses.find(l => l.installationId === item.id));
     if (kind === 'events') return `<tr><td>${date(item.createdAt)}</td><td>${e(item.type)}</td><td>${e(installation(item.installationId)?.name ?? item.installationId)}</td><td class="wrap">${e(item.description)}</td><td>${e(item.licenseId || '—')}<small>${e(item.id)}</small></td></tr>`;
-    const inst = installation(item.installationId);
-    return `<tr><td>${e(inst?.name || '—')}<small>${e(inst?.installationId || item.installationId)}</small><small>${e(item.id)}</small></td><td>${e(clientName(inst))}</td><td>${badge(effectiveStatus(item))}<small>Administrativo: ${e(item.status)}</small></td><td>${date(item.expiresAt)}<small>Tolerância: ${date(item.graceUntil)}</small></td><td>${item.status !== 'REVOKED' ? `<button data-action="renew" data-id="${e(item.id)}">Renovar</button><button data-action="${item.status === 'SUSPENDED' ? 'reactivate' : 'suspend'}" data-id="${e(item.id)}">${item.status === 'SUSPENDED' ? 'Reativar' : 'Suspender'}</button>` : '<small>Revogação definitiva</small>'}<button data-audit="${e(item.installationId)}" data-license="${e(item.id)}">Auditoria</button><button data-details="${e(item.id)}">Detalhes</button></td></tr>`;
+    return monitoringRow(installation(item.installationId), item);
+  }
+  function monitoringRow(inst, item) {
+    return `<tr><td>${e(inst?.name || '—')}<small>${e(inst?.installationId || item?.installationId)}</small><small>${e(productName(inst))}</small></td><td>${e(clientName(inst))}</td><td>${badge(item ? effectiveStatus(item) : 'Sem licença')}</td><td>${date(item?.expiresAt)}</td><td>${date(item?.graceUntil)}</td><td>${deadline(item)}</td><td>${e(inst?.reportedVersion || '—')}</td><td>${date(inst?.lastValidationAt)}<small>Atualizações: ${date(inst?.lastUpdateCheckAt)}</small></td><td>${item && item.status !== 'REVOKED' ? `<button data-action="renew" data-id="${e(item.id)}">Renovar</button><button data-action="${item.status === 'SUSPENDED' ? 'reactivate' : 'suspend'}" data-id="${e(item.id)}">${item.status === 'SUSPENDED' ? 'Reativar' : 'Suspender'}</button>` : ''}<button data-audit="${e(inst?.id || item?.installationId)}">Auditoria</button>${item ? `<button data-details="${e(item.id)}">Detalhes</button>` : ''}</td></tr>`;
   }
   const headings = { clients: ['Cliente', 'Documento', 'Contato', 'Cadastro', 'Instalações'], installations: ['Instalação', 'Cliente', 'Produto', 'Cadastro', 'Última validação', 'Ações'], licenses: ['Instalação / licença', 'Cliente', 'Status estimado', 'Validade', 'Ações'], events: ['Data', 'Evento', 'Instalação', 'Descrição', 'Licença / evento'] };
+  headings.installations = headings.licenses = ['Instalação', 'Cliente', 'Status', 'Vencimento', 'Carência até', 'Prazo', 'Versão informada', 'Último check de licença', 'Ações'];
   function content() {
     if (!token) return;
     root.querySelector('#title').textContent = sections[view][0]; root.querySelector('#subtitle').textContent = sections[view][1];
@@ -138,7 +142,7 @@
       updatesContent(area);
     } else if (view === 'dashboard') {
       const active = cache.licenses.filter(l => effectiveStatus(l) === 'ACTIVE').length;
-      area.innerHTML = `<div class="stats">${[['Clientes', cache.clients.length, 'users'], ['Instalações', cache.installations.length, 'monitor'], ['Licenças', cache.licenses.length, 'key-round'], ['Licenças ativas', active, 'circle-check']].map(([label, value, name]) => `<div class="card"><div class="stat-label">${label}${icon(name)}</div><div class="metric">${value}</div><small>Base administrativa</small></div>`).join('')}</div><div class="card"><h2>Distribuição das licenças</h2><div class="statuses">${statuses.map(s => `<button data-status="${s}">${badge(s)} <strong>${cache.licenses.filter(l => effectiveStatus(l) === s).length}</strong></button>`).join('')}</div><small>Status estimado pelas datas e cadastros habilitados. A validação assinada é emitida pela API.</small></div><div class="card" style="margin-top:20px"><h2>Licenças com vencimento próximo</h2>${table(headings.licenses, cache.licenses.filter(l => ['ACTIVE', 'GRACE'].includes(effectiveStatus(l)) && Date.parse(l.expiresAt) <= Date.now() + 7 * 86400000).sort((a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt)).slice(0, 8).map(l => row('licenses', l)))}</div>`;
+      area.innerHTML = `<div class="stats">${[['Clientes', cache.clients.length, 'users'], ['Instalações', cache.installations.length, 'monitor'], ['Licenças', cache.licenses.length, 'key-round'], ['Licenças ativas', active, 'circle-check']].map(([label, value, name]) => `<div class="card"><div class="stat-label">${label}${icon(name)}</div><div class="metric">${value}</div><small>Base administrativa</small></div>`).join('')}</div><div class="card"><h2>Distribuição das licenças</h2><div class="statuses">${[...statuses, 'SOON', 'TODAY', 'CRITICAL'].map(s => `<button data-status="${s}">${e(labels[s] || s)} <strong>${cache.licenses.filter(l => matches(l, s)).length}</strong></button>`).join('')}</div><small>Status calculado pela política atual da Central. A validação assinada é emitida pela API.</small></div><div class="card" style="margin-top:20px"><h2>Licenças com vencimento próximo</h2>${table(headings.licenses, cache.licenses.filter(l => ['SOON', 'TODAY', 'GRACE', 'CRITICAL'].includes(state(l).nivel)).sort((a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt)).slice(0, 8).map(l => row('licenses', l)))}</div>`;
       area.querySelectorAll('[data-status]').forEach(b => { b.onclick = () => { view = 'licenses'; filter = b.dataset.status; page = 1; content(); }; });
     } else if (view === 'events') {
       area.innerHTML = `<div class="card"><form id="audit-filters"><div class="form-row"><div><label for="event-type">Tipo de evento</label><select name="type" id="event-type"><option value="">Todos os tipos</option>${eventTypes.map(t => `<option ${eventFilters.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select></div><div><label for="audit-installation">UUID da instalação</label><input name="installationId" id="audit-installation" value="${e(eventFilters.installationId || '')}" placeholder="Opcional" pattern="[0-9a-fA-F-]{36}"></div></div><div class="form-row"><div><label for="from">De</label><input type="datetime-local" id="from" name="from"></div><div><label for="to">Até</label><input type="datetime-local" id="to" name="to"></div></div><label for="audit-license">UUID da licença</label><input id="audit-license" name="licenseId" value="${e(eventFilters.licenseId || '')}" placeholder="Opcional" pattern="[0-9a-fA-F-]{36}"><div class="tools"><button class="primary" type="submit">${icon('filter')} Filtrar</button><button type="button" id="clear-audit">Limpar filtros</button></div><p class="error" role="alert"></p></form>${table(headings.events, events.map(item => row('events', item)))}${pager(eventTotal, 20)}</div>`;
@@ -151,7 +155,13 @@
       };
       area.querySelector('#clear-audit').onclick = () => { eventFilters = {}; page = 1; load(); };
     } else {
-      area.innerHTML = `<div class="card"><div class="tools"><input id="search" type="search" aria-label="Pesquisar registros" placeholder="Pesquisar por nome, identificador ou cliente…" value="${e(query)}"><select id="status-filter" aria-label="Filtrar status"><option value="">Todos os status</option>${(view === 'licenses' ? statuses : ['ACTIVE', 'SUSPENDED']).map(s => `<option ${filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>${view === 'licenses' ? '<p class="muted"><small>Status estimado com base no relógio do navegador. Consulte a coluna administrativa e as datas.</small></p>' : ''}<div id="results"></div></div>`;
+      const monitoring = ['licenses', 'installations'].includes(view);
+      area.innerHTML = `${monitoring ? summary() : ''}<div class="card"><div class="tools"><input id="search" type="search" aria-label="Pesquisar registros" placeholder="Pesquisar por nome, identificador ou cliente…" value="${e(query)}"><select id="status-filter" aria-label="Filtrar status"><option value="">Todos</option>${(monitoring ? Object.keys(labels) : ['ACTIVE', 'SUSPENDED']).map(key => `<option value="${key}" ${filter === key ? 'selected' : ''}>${e(labels[key])}</option>`).join('')}</select>${monitoring ? `<select id="ordering" aria-label="Ordenar por"><option value="expiresAt">Vencimento · mais próximo</option><option value="status">Status · atenção primeiro</option><option value="client">Cliente · A–Z</option><option value="check">Último check · mais antigo</option></select><small>Prazos por dia em America/Fortaleza. Atualização a cada minuto.</small>` : ''}</div><div id="results"></div></div>`;
+      area.querySelectorAll('[data-summary]').forEach(button => { button.onclick = () => { filter = button.dataset.summary; page = 1; content(); }; });
+      if (monitoring) {
+        area.querySelector('#ordering').value = ordering;
+        area.querySelector('#ordering').onchange = event => { ordering = event.target.value; page = 1; results(); };
+      }
       area.querySelector('#search').oninput = event => { query = event.target.value; page = 1; results(); };
       area.querySelector('#status-filter').onchange = event => { filter = event.target.value; page = 1; results(); };
       results();
@@ -232,7 +242,19 @@
     const items = cache[view].filter(item => {
       const inst = view === 'licenses' ? installation(item.installationId) : item;
       const values = [item.id, item.name, item.document, item.email, item.phone, item.installationId, clientName(inst), productName(inst), inst?.name, inst?.installationId];
-      return values.some(v => String(v ?? '').toLocaleLowerCase('pt-BR').includes(text)) && (!filter || (view === 'licenses' ? effectiveStatus(item) : item.active ? 'ACTIVE' : 'SUSPENDED') === filter);
+      return values.some(v => String(v ?? '').toLocaleLowerCase('pt-BR').includes(text)) && (!filter || (['licenses', 'installations'].includes(view) ? matches(licenseFor(item), filter) : (item.active ? 'ACTIVE' : 'SUSPENDED') === filter));
+    });
+    if (['licenses', 'installations'].includes(view)) items.sort((a, b) => {
+      const la = licenseFor(a), lb = licenseFor(b);
+      const ia = view === 'licenses' ? installation(a.installationId) : a, ib = view === 'licenses' ? installation(b.installationId) : b;
+      const timestamp = value => Number.isFinite(Date.parse(value)) ? Date.parse(value) : Infinity;
+      if (ordering === 'client') return clientName(ia).localeCompare(clientName(ib), 'pt-BR');
+      if (ordering === 'check') return timestamp(ia?.lastValidationAt) - timestamp(ib?.lastValidationAt);
+      if (ordering === 'status') {
+        const rank = ['CRITICAL', 'TODAY', 'SOON', 'GRACE', 'EXPIRED', 'SUSPENDED', 'REVOKED', 'ACTIVE', 'UNKNOWN'];
+        return rank.indexOf(state(la).nivel) - rank.indexOf(state(lb).nivel);
+      }
+      return timestamp(la?.expiresAt) - timestamp(lb?.expiresAt);
     });
     page = Math.min(page, Math.max(1, Math.ceil(items.length / 20)));
     root.querySelector('#results').innerHTML = table(headings[view], items.slice((page - 1) * 20, page * 20).map(item => row(view, item))) + pager(items.length, 20);
@@ -244,7 +266,8 @@
     root.querySelectorAll('[data-audit]').forEach(b => { b.onclick = () => { eventFilters = { installationId: b.dataset.audit, ...(b.dataset.license ? { licenseId: b.dataset.license } : {}) }; view = 'events'; page = 1; content(); load(); }; });
     root.querySelectorAll('[data-details]').forEach(b => { b.onclick = () => {
       const item = lookup('licenses', b.dataset.details);
-      showModal('Detalhes da licença', `<p><strong>UUID:</strong> ${e(item.id)}</p><p><strong>Início:</strong> ${date(item.startsAt)}</p><p><strong>Vencimento:</strong> ${date(item.expiresAt)}</p><p><strong>Tolerância:</strong> ${date(item.graceUntil)}</p><p><strong>Status administrativo:</strong> ${e(item.status)}</p><p><strong>Observações:</strong> ${e(item.notes || '—')}</p><div class="dialog-actions"><button data-close>Fechar</button></div>`);
+      const inst = installation(item.installationId), info = state(item);
+      showModal('Detalhes da licença', `<p><strong>Instalação:</strong> ${e(inst?.name)}</p><p><strong>Cliente:</strong> ${e(clientName(inst))}</p><p><strong>UUID:</strong> ${e(item.id)}</p><p><strong>Status atual:</strong> ${badge(info.status)} ${deadline(item)}</p><p><strong>Status administrativo:</strong> ${e(item.status)}</p><p><strong>Início:</strong> ${date(item.startsAt)}</p><p><strong>Vencimento:</strong> ${date(item.expiresAt)}</p><p><strong>Carência até:</strong> ${date(item.graceUntil)}</p><p><strong>Dias para vencer:</strong> ${e(info.diasParaVencer ?? '—')}</p><p><strong>Dias de carência restantes:</strong> ${e(info.diasCarenciaRestantes ?? '—')}</p><p><strong>Canal:</strong> ${e(inst?.updateChannel || '—')}</p><p><strong>Versão informada:</strong> ${e(inst?.reportedVersion || '—')}</p><p><strong>Último check de licença:</strong> ${date(inst?.lastValidationAt)}</p><p><strong>Último check de atualização:</strong> ${date(inst?.lastUpdateCheckAt)}</p><p><strong>Observa\u00e7\u00f5es:</strong> ${e(item.notes || '—')}</p><div class="dialog-actions"><button data-close>Fechar</button></div>`);
     }; });
   }
   function showModal(title, body) {
@@ -284,7 +307,7 @@
         closeModal();
         if (kind === 'installation') {
           // The secret is placed only in this transient dialog, never in cache/storage/logs.
-          showModal('Instalação criada', `<p class="info">Salve o segredo agora em um local seguro. Ele será removido ao fechar esta janela e não poderá ser consultado novamente.</p><label>Identificador da instalação</label><div class="secret">${e(result.installationId)}</div><label>installationSecret — exibição única</label><div class="secret">${e(result.installationSecret)}</div><div class="dialog-actions"><button data-close class="primary">Salvei o segredo • Fechar</button></div>`);
+          showModal('Instalação criada', `<p class="info"><strong>IMPORTANTE</strong><br>Este segredo será exibido somente uma vez.<br>Guarde-o em local seguro antes de fechar esta janela.</p><label>Identificador da instalação</label><div class="secret">${e(result.installationId)}</div><label>installationSecret — exibição única</label><div class="secret">${e(result.installationSecret)}</div><div class="dialog-actions"><button data-close class="primary">Salvei o segredo • Fechar</button></div>`);
           delete result.installationSecret;
         } else toast('Operação concluída com sucesso.');
         await load();
