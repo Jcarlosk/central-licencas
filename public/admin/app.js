@@ -5,8 +5,8 @@
   const notice = document.querySelector('#notice');
   const sections = { dashboard: ['Dashboard', 'Visão geral da sua central de licenciamento', 'layout-dashboard'], clients: ['Clientes', 'Clientes cadastrados na central', 'users'], installations: ['Instalações', 'Instalações e suas últimas validações', 'monitor'], licenses: ['Licenças', 'Validade, tolerância e gestão administrativa', 'key-round'], events: ['Auditoria', 'Histórico de operações e validações', 'history'] };
   const statuses = ['ACTIVE', 'GRACE', 'SUSPENDED', 'EXPIRED', 'REVOKED'];
-  sections.updates = ['Atualizações', 'Controle das versões por produto • modo de teste', 'download'];
-  let releases = [], updateProduct = '';
+  sections.updates = ['Atualizações', 'Controle das versões por produto • DRY-RUN e REAL', 'download'];
+  let releases = [], updateProduct = '', realPublicationEnabled = false;
   const eventTypes = ['INSTALLATION_CREATED', 'LICENSE_CREATED', 'LICENSE_RENEWED', 'LICENSE_SUSPENDED', 'LICENSE_REACTIVATED', 'LICENSE_REVOKED', 'LICENSE_VALIDATED'];
   let token = '', session = 0, generation = 0, expiryTimer, toastTimer, statusTimer;
   let view = 'dashboard', query = '', filter = '', page = 1, busy = false;
@@ -21,7 +21,7 @@
   const installation = id => lookup('installations', id);
   const clientName = item => lookup('clients', item?.clientId)?.name ?? '—';
   const productName = item => lookup('products', item?.productId)?.name ?? '—';
-  const errors = { INVALID_CREDENTIALS: 'E-mail ou senha inválidos.', UNAUTHORIZED: 'Sua sessão expirou. Entre novamente.', RATE_LIMITED: 'Muitas solicitações. Aguarde um minuto e tente novamente.', VALIDATION_ERROR: 'Confira os campos e os limites informados.', CONFLICT: 'Este registro já existe ou a instalação já possui licença.', INVALID_RELATION: 'Cliente, produto ou instalação não encontrado.', INACTIVE_ENTITY: 'A instalação, cliente e produto precisam estar habilitados.', LICENSE_REVOKED: 'Licenças revogadas não permitem alterações.', ALREADY_SUSPENDED: 'Esta licença já está suspensa.', LICENSE_NOT_SUSPENDED: 'Esta licença não está suspensa.', NOT_FOUND: 'Registro não encontrado.', RETRY_OPERATION: 'Houve uma operação concorrente. Atualize e tente novamente.' };
+  const errors = { INVALID_FILE_COUNT: 'Envie exatamente o instalador, latest.yml e blockmap.', INVALID_FILE_NAME: 'Nome de arquivo inv�lido. Evite pontos consecutivos e caracteres especiais.', INVALID_INSTALLER: 'O instalador deve ser um execut�vel Windows v�lido.', FILE_TOO_LARGE: 'Arquivo vazio ou maior que o limite permitido.', RELEASE_CHANGED: 'Rascunho alterado durante a opera��o. Atualize os dados e tente novamente.',  REAL_PUBLICATION_NOT_CONFIGURED: 'Publicação real desativada ou configuração GitHub incompleta.', REAL_PUBLICATION_FAILED: 'Publicação falhou. A versão permanece DRAFT; consulte a etapa segura no registro e tente novamente.', INVALID_UPDATE_METADATA: 'latest.yml divergente: confira versão, nome, SHA-512 e tamanho.', INVALID_BLOCKMAP: 'Blockmap inválido ou não corresponde ao instalador.', ASSET_SIZE_MISMATCH: 'Tamanho do arquivo divergente.', INVALID_CREDENTIALS: 'E-mail ou senha inválidos.', UNAUTHORIZED: 'Sua sessão expirou. Entre novamente.', RATE_LIMITED: 'Muitas solicitações. Aguarde um minuto e tente novamente.', VALIDATION_ERROR: 'Confira os campos e os limites informados.', CONFLICT: 'Este registro já existe ou a instalação já possui licença.', INVALID_RELATION: 'Cliente, produto ou instalação não encontrado.', INACTIVE_ENTITY: 'A instalação, cliente e produto precisam estar habilitados.', LICENSE_REVOKED: 'Licenças revogadas não permitem alterações.', ALREADY_SUSPENDED: 'Esta licença já está suspensa.', LICENSE_NOT_SUSPENDED: 'Esta licença não está suspensa.', NOT_FOUND: 'Registro não encontrado.', RETRY_OPERATION: 'Houve uma operação concorrente. Atualize e tente novamente.' };
   Object.assign(errors, { PRODUCT_NOT_FOUND: 'Produto não encontrado.', PRODUCT_MISMATCH: 'Produto não corresponde ao registro.', RELEASE_NOT_EDITABLE: 'Esta release não pode ser editada.', INVALID_RELEASE_STATE: 'O estado da release não permite esta ação.', RELEASE_CHANGED: 'A release mudou durante a operação. Atualize e tente novamente.', INVALID_FILE_COUNT: 'Envie exatamente instalador, latest.yml e blockmap.', INVALID_FILE_NAME: 'Nome de arquivo inválido.', INVALID_FILE_EXTENSION: 'Extensão de arquivo inválida.', INVALID_FILE_MIME: 'Tipo de arquivo inválido.', INVALID_INSTALLER: 'Instalador inválido: cabeçalho MZ ausente.', INVALID_UPDATE_METADATA: 'latest.yml não corresponde ao instalador e à versão.', BLOCKMAP_MISMATCH: 'O nome do blockmap deve ser o nome do instalador seguido de .blockmap.', FILE_TOO_LARGE: 'Arquivo vazio ou acima do limite permitido.', INVALID_UPLOAD: 'Upload incompleto ou inválido.' });
   const state = l => l?.adminState ?? { status: 'UNKNOWN', nivel: 'UNKNOWN', label: 'Sem licença' };
   const effectiveStatus = l => state(l).status;
@@ -111,7 +111,7 @@
         for (const kind of Object.keys(cache)) result[kind] = await all(kind);
         if (current !== generation || !token) return;
         cache = result;
-        if (view === 'updates') { const items = await all('updates'); if (current !== generation || !token) return; releases = items; }
+        if (view === 'updates') { const config = await api('updates/configuration'); realPublicationEnabled = config.realPublicationEnabled === true; const items = await all('updates'); if (current !== generation || !token) return; releases = items; }
       }
       content();
     } catch (err) {
@@ -189,7 +189,7 @@
     const items = releases.filter(r => r.productId === updateProduct);
     const latest = channel => items.filter(r => r.channel === channel && r.status === 'PUBLISHED' && !r.dryRun).sort((a, b) => compareVersions(b.version, a.version))[0];
     const published = items.filter(r => r.publishedAt).sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))[0];
-    area.innerHTML = `<div class="card"><label for="update-product">Produto</label><select id="update-product">${options(cache.products, p => p.name)}</select><p class="info">DRY-RUN: valida arquivos e simula a publicação. Nenhuma versão de teste é distribuída.</p><div class="stats">${[['Versão estável', latest('stable')?.version || '—'], ['Versão beta', latest('beta')?.version || '—'], ['Última publicação', date(published?.publishedAt)]].map(([label, value]) => `<div><small>${e(label)}</small><p><strong>${e(value)}</strong></p></div>`).join('')}</div><h2>Histórico de versões</h2>${table(['Versão', 'Canal', 'Status', 'Publicada em', 'Tipo', 'Ações'], items.map(r => `<tr><td>${e(r.version)}<small>${e(r.title)}</small>${r.sha256 ? `<small>SHA-256: ${e(r.sha256)}</small>` : ''}</td><td>${e(r.channel)}</td><td>${badge(r.status)}<small>${r.dryRun ? 'Teste / dry-run' : ''}</small></td><td>${date(r.publishedAt)}</td><td>${r.mandatory ? 'Obrigatória' : 'Opcional'}</td><td>${r.status === 'DRAFT' ? `<button data-edit-update="${e(r.id)}">Editar / simular</button>` : ''}${r.status !== 'DISABLED' ? `<button data-disable-update="${e(r.id)}">Desabilitar distribuição</button>` : ''}</td></tr>`))}</div><div class="card" style="margin-top:20px"><h2>Instalações e canais</h2>${table(['Instalação', 'Cliente', 'Canal permitido', 'Versão informada', 'Último check', 'Ações'], cache.installations.filter(i => i.productId === updateProduct).map(i => `<tr><td>${e(i.name)}</td><td>${e(clientName(i))}</td><td>${e(i.updateChannel || 'stable')}</td><td>${e(i.reportedVersion || '—')}</td><td>${date(i.lastUpdateCheckAt)}</td><td><button data-channel-installation="${e(i.id)}" data-channel="${i.updateChannel === 'beta' ? 'stable' : 'beta'}">${i.updateChannel === 'beta' ? 'Usar stable' : 'Habilitar beta'}</button></td></tr>`))}</div>`;
+    area.innerHTML = `<div class="card"><label for="update-product">Produto</label><select id="update-product">${options(cache.products, p => p.name)}</select><p class="info">${realPublicationEnabled ? "MODO DE PUBLICAÇÃO: REAL habilitado; DRY-RUN disponível." : "MODO DE PUBLICAÇÃO: DRY-RUN. Publicação REAL desativada no servidor."}</p><div class="stats">${[['Versão estável', latest('stable')?.version || '—'], ['Versão beta', latest('beta')?.version || '—'], ['Última publicação', date(published?.publishedAt)]].map(([label, value]) => `<div><small>${e(label)}</small><p><strong>${e(value)}</strong></p></div>`).join('')}</div><h2>Histórico de versões</h2>${table(['Versão', 'Canal', 'Status', 'Publicada em', 'Tipo', 'Ações'], items.map(r => `<tr><td>${e(r.version)}<small>${e(r.title)}</small>${r.publicationLog?.mode === "REAL" && r.publicationLog?.assets?.find(a => a.kind === "installer") ? `<small>Arquivo publicado: ${e(r.publicationLog.assets.find(a => a.kind === "installer").name)}</small>` : ""}${r.sha256 ? `<small>SHA-256: ${e(r.sha256)}</small>` : ''}</td><td>${e(r.channel)}</td><td>${badge(r.status)}<small>${e({ DRAFT: 'Rascunho', PUBLISHED: 'Publicada', DISABLED: 'Distribuição desabilitada' }[r.status] || r.status)}</small>${r.publicationLog?.failed ? `<small>Falha: ${e(r.publicationLog.stage)}. Release GitHub: ${e(r.publicationLog.releaseId || '—')}</small>` : ''}<small>${r.dryRun ? 'Teste / dry-run' : ''}</small></td><td>${date(r.publishedAt)}</td><td>${r.mandatory ? 'Obrigatória' : 'Opcional'}</td><td>${r.status === 'DRAFT' ? `<button data-edit-update="${e(r.id)}">Editar / simular / publicar</button>` : ''}${r.status !== 'DISABLED' ? `<button data-disable-update="${e(r.id)}">Desabilitar distribuição</button>` : ''}</td></tr>`))}</div><div class="card" style="margin-top:20px"><h2>Instalações e canais</h2>${table(['Instalação', 'Cliente', 'Canal permitido', 'Versão informada', 'Último check', 'Ações'], cache.installations.filter(i => i.productId === updateProduct).map(i => `<tr><td>${e(i.name)}</td><td>${e(clientName(i))}</td><td>${e(i.updateChannel || 'stable')}</td><td>${e(i.reportedVersion || '—')}</td><td>${date(i.lastUpdateCheckAt)}</td><td><button data-channel-installation="${e(i.id)}" data-channel="${i.updateChannel === 'beta' ? 'stable' : 'beta'}">${i.updateChannel === 'beta' ? 'Usar stable' : 'Habilitar beta'}</button></td></tr>`))}</div>`;
     area.querySelector('#update-product').value = updateProduct;
     area.querySelector('#update-product').onchange = event => { updateProduct = event.target.value; content(); };
     area.querySelectorAll('[data-edit-update]').forEach(b => { b.onclick = () => updateForm(releases.find(r => r.id === b.dataset.editUpdate)); });
@@ -204,7 +204,7 @@
   }
   function updateForm(item) {
     if (busy) { toast('Aguarde a atualização dos dados.'); return; }
-    showModal('Publicar atualização', `<form id="update-form"><label for="release-product">Produto</label><select id="release-product" name="productId" required>${options(cache.products.filter(p => p.active), p => p.name)}</select><label for="release-version">Versão (SemVer)</label><input id="release-version" name="version" placeholder="1.0.1" maxlength="100" required><label for="release-channel">Canal</label><select id="release-channel" name="channel"><option value="stable">Estável</option><option value="beta">Beta</option></select><label for="release-mandatory">Tipo</label><select id="release-mandatory" name="mandatory"><option value="false">Opcional</option><option value="true">Obrigatória</option></select><label for="release-title">Título</label><input id="release-title" name="title" maxlength="200" required><label for="release-notes">Notas da versão</label><textarea id="release-notes" name="notes" maxlength="10000"></textarea><label for="release-installer">Setup.exe (até 250 MiB)</label><input id="release-installer" name="installer" type="file" accept=".exe"><label for="release-metadata">latest.yml (até 64 KiB)</label><input id="release-metadata" name="metadata" type="file" accept=".yml"><label for="release-blockmap">Setup.exe.blockmap (até 10 MiB)</label><input id="release-blockmap" name="blockmap" type="file" accept=".blockmap"><p class="info">O latest.yml deve corresponder à versão, nome, tamanho e SHA-512 do instalador. Arquivos são temporários e precisam ser reenviados em cada simulação.</p><p class="error" role="alert"></p><div class="dialog-actions"><button type="button" data-close>Cancelar</button><button type="submit" name="intent" value="draft">Salvar draft</button><button class="primary" type="submit" name="intent" value="publish">Publicar (dry-run)</button></div></form>`);
+    showModal('Publicar atualização', `<form id="update-form"><label for="release-product">Produto</label><select id="release-product" name="productId" required>${options(cache.products.filter(p => p.active), p => p.name)}</select><label for="release-version">Versão (SemVer)</label><input id="release-version" name="version" placeholder="1.0.1" maxlength="100" required><label for="release-channel">Canal</label><select id="release-channel" name="channel"><option value="stable">Estável</option><option value="beta">Beta</option></select><label for="release-mandatory">Tipo</label><select id="release-mandatory" name="mandatory"><option value="false">Opcional</option><option value="true">Obrigatória</option></select><label for="release-title">Título</label><input id="release-title" name="title" maxlength="200" required><label for="release-notes">Notas da versão</label><textarea id="release-notes" name="notes" maxlength="10000"></textarea><label for="release-installer">Setup.exe (até 250 MiB)</label><input id="release-installer" name="installer" type="file" accept=".exe"><label for="release-metadata">latest.yml (até 64 KiB)</label><input id="release-metadata" name="metadata" type="file" accept=".yml"><label for="release-blockmap">Setup.exe.blockmap (até 10 MiB)</label><input id="release-blockmap" name="blockmap" type="file" accept=".blockmap"><p class="info">O latest.yml deve corresponder à versão, nome, tamanho e SHA-512 do instalador. Arquivos são temporários e precisam ser reenviados em cada simulação ou publicação.</p><p class="error" role="alert"></p><div class="dialog-actions"><button type="button" data-close>Cancelar</button><button type="submit" name="intent" value="draft">Salvar draft</button><button class="primary" type="submit" name="intent" value="publish">Simular (DRY-RUN)</button><button class="primary" type="submit" name="intent" value="real" ${realPublicationEnabled ? "" : "disabled"}>Publicar versão (REAL)</button></div></form>`);
     const form = modal.querySelector('form');
     form.elements.productId.value = item?.productId || updateProduct;
     if (item) for (const key of ['version', 'channel', 'mandatory', 'title', 'notes']) form.elements[key].value = String(item[key]);
@@ -213,7 +213,9 @@
     const currentSession = session;
     form.onsubmit = async event => {
       event.preventDefault(); if (submitting) return;
-      const publish = event.submitter?.value === 'publish';
+      const real = event.submitter?.value === 'real';
+      if (real && !realPublicationEnabled) return;
+      const publish = real || event.submitter?.value === 'publish';
       const body = Object.fromEntries(['productId', 'version', 'channel', 'title', 'notes'].map(k => [k, form.elements[k].value]));
       body.mandatory = form.elements.mandatory.value === 'true';
       const files = new FormData();
@@ -221,6 +223,13 @@
         const file = form.elements[key].files[0];
         if (!file) { form.querySelector('.error').textContent = 'Selecione os três arquivos para simular a publicação.'; return; }
         files.append(key, file);
+      }
+      if (real) {
+        const dialog = document.createElement('dialog');
+        dialog.innerHTML = `<h2>PUBLICAÇÃO REAL</h2><p>Publicar a versão ${e(body.version)} no canal ${e(body.channel)}?</p><p>Após a publica??o, instalações elegíveis poderão receber esta atualização.</p><form method="dialog"><button value="cancel">Cancelar</button><button value="publish" class="primary">Publicar versão</button></form>`;
+        document.body.append(dialog); dialog.showModal();
+        const approved = await new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'publish'), { once: true }));
+        dialog.remove(); if (!approved) return;
       }
       submitting = true; form.querySelectorAll('button').forEach(b => { b.disabled = true; });
       const preventClose = event => event.preventDefault(); modal.addEventListener('cancel', preventClose);
@@ -230,11 +239,11 @@
         if (session !== currentSession || !token) return;
         draftId = result.data.id;
         form.elements.productId.disabled = true;
-        if (publish) await api(`updates/${draftId}/publish`, files);
+        if (publish) await api(`updates/${draftId}/${real ? "publish-real" : "publish"}`, files);
         if (session !== currentSession || !token) return;
-        closeModal(); toast(publish ? 'Simulação concluída. Release permanece DRAFT e não é distribuída.' : 'Draft salvo.'); await load();
+        closeModal(); toast(real ? 'Versão publicada. Instalações elegíveis poderão recebê-la.' : publish ? 'Simulação concluída. Release permanece DRAFT e não é distribuída.' : 'Draft salvo.'); await load();
       } catch (err) { if (form.isConnected) form.querySelector('.error').textContent = `${draftId ? 'Draft salvo. ' : ''}${err.message}`; }
-      finally { submitting = false; modal.removeEventListener('cancel', preventClose); if (form.isConnected) { form.querySelectorAll('button').forEach(b => { b.disabled = false; }); modal.querySelector('.dialog-top button').disabled = false; } }
+      finally { submitting = false; modal.removeEventListener('cancel', preventClose); if (form.isConnected) { form.querySelectorAll('button').forEach(b => { b.disabled = b.value === 'real' && !realPublicationEnabled; }); modal.querySelector('.dialog-top button').disabled = false; } }
     };
   }
   function results() {
@@ -314,7 +323,7 @@
       } catch (err) { if (form.isConnected) form.querySelector('.error').textContent = err.message; }
       finally {
         submitting = false; modal.removeEventListener('cancel', blockCancel);
-        if (form.isConnected) { form.querySelectorAll('button').forEach(b => { b.disabled = false; }); modal.querySelector('.dialog-top button').disabled = false; }
+        if (form.isConnected) { form.querySelectorAll('button').forEach(b => { b.disabled = b.value === 'real' && !realPublicationEnabled; }); modal.querySelector('.dialog-top button').disabled = false; }
       }
     };
   }

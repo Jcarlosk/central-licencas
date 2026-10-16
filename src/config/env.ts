@@ -24,6 +24,10 @@ const schema = z.preprocess(input => {
   // never be rejected because of an unused PATH setting, even if it is invalid.
   return hasBase64 ? { ...env, LICENSE_PRIVATE_KEY_PATH: undefined, LICENSE_PUBLIC_KEY_PATH: undefined } : input;
 }, z.object({
+  GITHUB_UPDATES_ENABLED: z.enum(['true', 'false']).default('false'),
+  GITHUB_UPDATES_TOKEN: optionalKeySetting,
+  GITHUB_UPDATES_OWNER: optionalKeySetting,
+  GITHUB_UPDATES_REPO: optionalKeySetting,
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   DATABASE_URL: z.string().min(1).refine(value => databaseUrlScheme(value) !== 'invalid'),

@@ -22,6 +22,34 @@ export function updateResponse(release: UpdateRelease): UpdateCheckResponse {
     kind: z.string(), name: z.string(), size: z.number(), sha512: z.string().optional(),
   })) }).safeParse(release.publicationLog);
   const installer = summary.success ? summary.data.assets.find(asset => asset.kind === 'installer') : undefined;
+  let validUrl = false;
+  try {
+    const url = new URL(release.installerUrl!);
+    validUrl = url.origin === 'https://github.com' && !url.username && !url.password && !url.hash && !url.search &&
+      decodeURIComponent(url.pathname.split('/').pop()!) === installer?.name;
+  } catch { /* Incomplete/unsafe metadata must never be offered. */ }
+  const log = z.object({ mode: z.literal('REAL'), assets: z.array(z.object({
+    id: z.string().regex(/^[1-9][0-9]*$/), kind: z.enum(['installer', 'metadata', 'blockmap']),
+    name: z.string(), downloadUrl: z.url(), size: z.number().int().positive(),
+    sha256: z.string().optional(),
+  })).length(3) }).safeParse(release.publicationLog);
+  if (!log.success || new Set(log.data.assets.map(a => a.kind)).size !== 3 ||
+    new Set(log.data.assets.map(a => a.id)).size !== 3 ||
+    log.data.assets.some(asset => {
+      try {
+        const url = new URL(asset.downloadUrl);
+        return url.origin !== 'https://github.com' || !!url.username || !!url.password || !!url.search || !!url.hash ||
+          decodeURIComponent(url.pathname.split('/').pop()!) !== asset.name;
+      } catch { return true; }
+    }) ||
+    log.data.assets.find(a => a.kind === 'installer')?.downloadUrl !== release.installerUrl ||
+    log.data.assets.find(a => a.kind === 'installer')?.sha256 !== release.sha256 ||
+    log.data.assets.find(a => a.kind === 'metadata')?.name !== 'latest.yml' ||
+    log.data.assets.find(a => a.kind === 'metadata')?.downloadUrl !== release.metadataUrl ||
+    log.data.assets.find(a => a.kind === 'blockmap')?.name !== `${installer?.name}.blockmap`) {
+    throw new ApiError(503, 'UPDATE_METADATA_UNAVAILABLE');
+  }
+  if (!validUrl || !release.sha256 || !/^[a-f0-9]{64}$/.test(release.sha256)) throw new ApiError(503, 'UPDATE_METADATA_UNAVAILABLE');
   if (!installer || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,159}\.exe$/i.test(installer.name) || installer.name.includes('..') ||
     !Number.isSafeInteger(installer.size) || installer.size <= 0 ||
     !installer.sha512 || !/^[A-Za-z0-9+/]{86}==$/.test(installer.sha512)) {

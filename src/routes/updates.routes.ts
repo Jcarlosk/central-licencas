@@ -9,8 +9,8 @@ import type { Context } from '../types/context.js';
 import { pagination, paged, uuid } from '../utils/schemas.js';
 import { releaseBody, checkBody } from '../utils/update-schemas.js';
 import { ApiError } from '../utils/errors.js';
-import { validateAssetName, validateUpdateAssets, MAX_FILE_BYTES, type UpdateAsset } from '../services/update-files.js';
-import { DryRunPublisher } from '../services/github-releases.js';
+import { validateAssetName, validateUpdateAssets, prepareGitHubAssets, MAX_FILE_BYTES, type UpdateAsset } from '../services/update-files.js';
+import { DryRunPublisher, GitHubHttpTransport, GitHubReleasePublisher, PartialPublicationError } from '../services/github-releases.js';
 import { checkUpdates } from '../services/updates.js';
 
 export function publicUpdatesRoutes(ctx: Context) {
@@ -18,8 +18,9 @@ export function publicUpdatesRoutes(ctx: Context) {
   router.post('/check', async (req, res) => { res.json(await checkUpdates(ctx, checkBody.parse(req.body))); });
   return router;
 }
-export function updatesRoutes({ db }: Context) {
+export function updatesRoutes({ db, env }: Context) {
   const router = Router();
+  router.get('/configuration', (_req, res) => { res.json({ success: true, realPublicationEnabled: env.GITHUB_UPDATES_ENABLED === 'true' && !!env.GITHUB_UPDATES_TOKEN && !!env.GITHUB_UPDATES_OWNER && !!env.GITHUB_UPDATES_REPO }); });
   router.get('/', async (req, res) => {
     const { productId, ...query } = z.object({ productId: uuid.optional(), page: z.coerce.number().optional(), limit: z.coerce.number().optional() }).strict().parse(req.query);
     const { page, limit } = pagination.parse(query);
@@ -57,7 +58,9 @@ export function updatesRoutes({ db }: Context) {
     if (!result.count) throw new ApiError(409, 'INVALID_RELEASE_STATE');
     res.json({ success: true, data: await db.updateRelease.findUniqueOrThrow({ where: { id } }) });
   });
-  router.post('/:id/publish', async (req, res) => {
+  router.post(['/:id/publish', '/:id/publish-real'], async (req, res) => {
+    const real = req.path.endsWith('/publish-real');
+    if (real && (env.GITHUB_UPDATES_ENABLED !== 'true' || !env.GITHUB_UPDATES_TOKEN || !env.GITHUB_UPDATES_OWNER || !env.GITHUB_UPDATES_REPO)) throw new ApiError(503, 'REAL_PUBLICATION_NOT_CONFIGURED');
     const id = uuid.parse(req.params.id);
     const initial = await db.updateRelease.findUnique({ where: { id } });
     if (!initial) throw new ApiError(404, 'NOT_FOUND');
@@ -78,18 +81,40 @@ export function updatesRoutes({ db }: Context) {
       await new Promise<void>((resolve, reject) => upload(req, res, error => error ? reject(error instanceof ApiError || error instanceof multer.MulterError ? error : new ApiError(400, 'INVALID_UPLOAD')) : resolve()));
       const files = Object.values((req.files ?? {}) as Record<string, Express.Multer.File[]>).flat();
       const assets: UpdateAsset[] = files.map(f => ({ name: f.originalname, path: f.path, size: f.size, mime: f.mimetype, kind: f.fieldname as UpdateAsset['kind'] }));
-      const validated = await validateUpdateAssets(assets, initial.version);
-      // Intentionally hard-wired to dry run. Environment/token cannot enable publication.
-      const result = await new DryRunPublisher().publish(initial, assets);
-      const updated = await db.$transaction(async tx => {
-        const product = await tx.product.findUnique({ where: { id: initial.productId } });
-        if (!product?.active) throw new ApiError(409, 'INACTIVE_ENTITY');
-        const changed = await tx.updateRelease.updateMany({ where: { id, status: 'DRAFT', updatedAt: initial.updatedAt, githubReleaseId: null },
-          data: { sha256: validated.sha256, dryRun: true, publicationLog: { steps: result.steps, assets: validated.assets } } });
-        if (!changed.count) throw new ApiError(409, 'RELEASE_CHANGED');
-        return tx.updateRelease.findUniqueOrThrow({ where: { id } });
-      });
-      res.json({ success: true, data: updated, dryRun: true, steps: result.steps });
+      let validated = await validateUpdateAssets(assets, initial.version, real);
+      const prepared = real ? await prepareGitHubAssets(assets) : assets;
+      if (real) validated = await validateUpdateAssets(prepared, initial.version, true);
+      const transport = real ? new GitHubHttpTransport({ token: env.GITHUB_UPDATES_TOKEN!, owner: env.GITHUB_UPDATES_OWNER!, repo: env.GITHUB_UPDATES_REPO! }) : undefined;
+      let publishedId: string | undefined;
+      try {
+        const updated = await db.$transaction(async tx => {
+          // Serialize publication across processes; editing/disable cannot win during publication.
+          await tx.$queryRaw`SELECT id FROM "UpdateRelease" WHERE id = ${id}::uuid FOR UPDATE`;
+          const current = await tx.updateRelease.findUniqueOrThrow({ where: { id } });
+          if (current.status !== 'DRAFT' || current.githubReleaseId || current.updatedAt.getTime() !== initial.updatedAt.getTime()) throw new ApiError(409, 'RELEASE_CHANGED');
+          await tx.$queryRaw`SELECT id FROM "Product" WHERE id = ${initial.productId}::uuid FOR SHARE`;
+          const product = await tx.product.findUnique({ where: { id: initial.productId } });
+          if (!product?.active) throw new ApiError(409, 'INACTIVE_ENTITY');
+          const result = await (transport ? new GitHubReleasePublisher(transport) : new DryRunPublisher()).publish(initial, prepared);
+          publishedId = result.githubReleaseId;
+          const summaryAssets = validated.assets.map(asset => ({ ...asset, sourceName: assets.find(a => a.kind === asset.kind)!.name, ...(result.assets?.find(a => a.kind === asset.kind) ?? {}) }));
+          if (real && (!result.installerUrl || !result.metadataUrl || !publishedId || summaryAssets.some(a => !('id' in a) || !a.id))) throw new ApiError(502, 'UPDATE_METADATA_UNAVAILABLE');
+          return tx.updateRelease.update({ where: { id }, data: {
+            sha256: validated.sha256, dryRun: !real,
+            publicationLog: { mode: real ? 'REAL' : 'DRY_RUN', steps: result.steps, assets: summaryAssets },
+            ...(real ? { status: 'PUBLISHED', githubReleaseId: publishedId, installerUrl: result.installerUrl, metadataUrl: result.metadataUrl, publishedAt: new Date() } : {}),
+          } });
+        }, { timeout: 1_200_000, maxWait: 5000 });
+        res.json({ success: true, data: updated, dryRun: !real, steps: (updated.publicationLog as { steps: string[] }).steps });
+      } catch (error) {
+        if (publishedId && transport) { try { await transport.remove(publishedId); } catch { /* Log safe recovery id below. */ } }
+        if (real && !(error instanceof ApiError)) {
+          const failure = error instanceof PartialPublicationError ? { stage: error.stage, releaseId: error.releaseId ?? null } : { stage: 'PERSIST_METADATA', releaseId: publishedId ?? null };
+          await db.updateRelease.updateMany({ where: { id, status: 'DRAFT', updatedAt: initial.updatedAt }, data: { publicationLog: { mode: 'REAL', failed: true, ...failure } } });
+          throw new ApiError(502, 'REAL_PUBLICATION_FAILED');
+        }
+        throw error;
+      }
     } catch (error) {
       if (error instanceof multer.MulterError) throw new ApiError(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400, error.code === 'LIMIT_FILE_SIZE' ? 'FILE_TOO_LARGE' : 'INVALID_FILE_COUNT');
       throw error;
