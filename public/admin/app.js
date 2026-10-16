@@ -231,6 +231,7 @@
         const approved = await new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'publish'), { once: true }));
         dialog.remove(); if (!approved) return;
       }
+      if (session !== currentSession || !token) return;
       submitting = true; form.querySelectorAll('button').forEach(b => { b.disabled = true; });
       const preventClose = event => event.preventDefault(); modal.addEventListener('cancel', preventClose);
       modal.querySelector('.dialog-top button').disabled = true;
