@@ -9,11 +9,12 @@ import { ApiError } from '../utils/errors.js';
 export const MAX_FILE_BYTES = 250 * 1024 * 1024;
 export const MAX_METADATA_BYTES = 64 * 1024;
 export const MAX_BLOCKMAP_BYTES = 10 * 1024 * 1024;
-export interface UpdateAsset { name: string; path: string; size: number; mime: string; kind: 'installer' | 'metadata' | 'blockmap'; }
+export interface UpdateAsset { name: string; sourceName?: string; path: string; size: number; mime: string; kind: 'installer' | 'metadata' | 'blockmap'; }
+export function githubAssetName(name: string) { return name.replace(/ /g, '.'); }
 // Only operates on the upload's temporary metadata copy, after original validation.
 export async function prepareGitHubAssets(assets: UpdateAsset[]): Promise<UpdateAsset[]> {
   const installer = assets.find(a => a.kind === 'installer')!;
-  const name = installer.name.replace(/ /g, '.');
+  const name = githubAssetName(installer.name);
   if (name === installer.name) return assets;
   const metadata = assets.find(a => a.kind === 'metadata')!;
   const document = parseDocument(await readFile(metadata.path, 'utf8'));
@@ -21,6 +22,7 @@ export async function prepareGitHubAssets(assets: UpdateAsset[]): Promise<Update
   document.setIn(['files', 0, 'url'], name);
   await writeFile(metadata.path, document.toString(), 'utf8');
   return assets.map(asset => ({ ...asset,
+    sourceName: asset.sourceName ?? asset.name,
     name: asset.kind === 'installer' ? name : asset.kind === 'blockmap' ? `${name}.blockmap` : asset.name,
     size: asset.kind === 'metadata' ? Buffer.byteLength(document.toString()) : asset.size,
   }));

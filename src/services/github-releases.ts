@@ -1,5 +1,6 @@
 import type { ReleaseInput } from '../utils/update-schemas.js';
 import type { UpdateAsset } from './update-files.js';
+import { githubAssetName, prepareGitHubAssets, validateAssetName } from './update-files.js';
 import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 
@@ -10,7 +11,7 @@ export class GitHubRequestError extends Error {
   constructor(public readonly status: number | undefined, public readonly code?: string, public readonly stage?: string, message = 'GITHUB_REQUEST_FAILED') { super(message); }
 }
 
-export interface PublishedAsset { id: string; name: string; size: number; downloadUrl: string; kind: UpdateAsset['kind'] }
+export interface PublishedAsset { id: string; name: string; sourceName?: string; size: number; downloadUrl: string; kind: UpdateAsset['kind'] }
 export interface PublicationResult {
   assets?: PublishedAsset[];
   dryRun: boolean; steps: string[]; githubReleaseId?: string; installerUrl?: string; metadataUrl?: string;
@@ -34,7 +35,7 @@ export interface GitHubReleaseTransport {
   reconcilePublished?(id: string, input: ReleaseInput, assets: UpdateAsset[]): Promise<PublishedAsset[]>;
   remove?(releaseId: string): Promise<void>;
   createDraft(input: { tag_name: string; name: string; body: string; prerelease: boolean }): Promise<{ id: string }>;
-  upload(releaseId: string, asset: UpdateAsset): Promise<{ browserDownloadUrl: string; id?: string }>;
+  upload(releaseId: string, asset: UpdateAsset): Promise<{ browserDownloadUrl: string; id?: string; name?: string; size?: number }>;
   publish(releaseId: string): Promise<void>;
 }
 export class GitHubHttpTransport implements GitHubReleaseTransport {
@@ -61,6 +62,17 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
     }
   }
   private releaseId(id: string) { if (!/^[1-9][0-9]*$/.test(id)) throw new Error('INVALID_GITHUB_RELEASE_ID'); return id; }
+  private remoteAsset(value: any, kind: UpdateAsset['kind'], tag?: string): PublishedAsset {
+    try {
+      if (!Number.isSafeInteger(value.id) || value.id <= 0 || value.state !== 'uploaded' || !Number.isSafeInteger(value.size) || value.size <= 0 || typeof value.name !== 'string' || typeof value.browser_download_url !== 'string') throw Error();
+      validateAssetName(value.name, kind, kind === 'metadata' ? 'text/yaml' : 'application/octet-stream');
+      const url = new URL(value.browser_download_url);
+      const parts = url.pathname.split('/');
+      if (url.origin !== 'https://github.com' || url.username || url.password || url.search || url.hash || parts.length !== 7 || parts[1] !== this.config.owner || parts[2] !== this.config.repo || parts[3] !== 'releases' || parts[4] !== 'download' || !parts[5] || (tag !== undefined && decodeURIComponent(parts[5]!) !== tag) || decodeURIComponent(parts[6]!) !== value.name) throw Error();
+      // Validate the API URL; never synthesize a replacement URL from a local name.
+      return { id: String(value.id), name: value.name, size: value.size, kind, downloadUrl: value.browser_download_url };
+    } catch { throw new Error('INVALID_GITHUB_ASSET'); }
+  }
   async verifyDownload(url: string) {
     // No GitHub credentials are sent to browser/CDN URLs, including redirects.
     let status: number | undefined, redirects = 0, initialOrigin: string | null = null, finalOrigin: string | null = null;
@@ -116,10 +128,11 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
     for (const asset of assets) {
       const hash = createHash('sha256');
       for await (const chunk of createReadStream(asset.path)) hash.update(chunk);
-      const remote = value.assets.find((a: any) => a.name === asset.name);
-      const expectedUrl = `https://github.com/${this.config.owner}/${this.config.repo}/releases/download/v${input.version}/${encodeURIComponent(asset.name)}`;
-      if (!remote || !Number.isSafeInteger(remote.id) || remote.id <= 0 || remote.state !== 'uploaded' || remote.size !== asset.size || remote.digest !== `sha256:${hash.digest('hex')}` || remote.browser_download_url !== expectedUrl) throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', 'GITHUB_ASSETS_INCOMPLETE');
-      published.push({ id: String(remote.id), name: asset.name, kind: asset.kind, size: asset.size, downloadUrl: remote.browser_download_url });
+      const digest = `sha256:${hash.digest('hex')}`;
+      const candidates = value.assets.filter((a: any) => a.size === asset.size && a.digest === digest && a.state === 'uploaded' && a.name === githubAssetName(asset.name));
+      if (candidates.length !== 1) throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', asset.kind === 'metadata' ? 'GITHUB_METADATA_RECONCILIATION_REQUIRED' : 'GITHUB_ASSETS_INCOMPLETE');
+      const remote = this.remoteAsset(candidates[0], asset.kind, `v${input.version}`);
+      published.push({ ...remote, sourceName: asset.sourceName ?? asset.name });
     }
     if (new Set(published.map(a => a.id)).size !== 3) throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', 'GITHUB_ASSETS_INCOMPLETE');
     return published;
@@ -184,11 +197,9 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
     try {
       const options = { method: 'POST', duplex: 'half', headers: { 'Content-Type': asset.mime, 'Content-Length': String(asset.size) }, body: stream as unknown as BodyInit };
       const value = await this.request(`https://uploads.github.com${this.repository}/${this.releaseId(releaseId)}/assets?name=${encodeURIComponent(asset.name)}`, options);
-      if (typeof value.browser_download_url !== 'string' || value.state !== 'uploaded' || value.name !== asset.name || value.size !== asset.size) throw new Error('INVALID_GITHUB_ASSET');
-      const url = new URL(value.browser_download_url);
-      if (url.origin !== 'https://github.com' || !url.pathname.startsWith(`/${this.config.owner}/${this.config.repo}/releases/download/`) || url.username || url.password) throw new Error('INVALID_GITHUB_DOWNLOAD_URL');
-      if (!Number.isSafeInteger(value.id) || Number(value.id) <= 0 || url.search || url.hash || decodeURIComponent(url.pathname.split('/').pop()!) !== asset.name) throw new Error('INVALID_GITHUB_ASSET');
-      return { browserDownloadUrl: url.toString(), id: String(value.id) };
+      const remote = this.remoteAsset(value, asset.kind);
+      if (remote.name !== githubAssetName(asset.name) || remote.size !== asset.size) throw new Error('INVALID_GITHUB_ASSET');
+      return { browserDownloadUrl: remote.downloadUrl, id: remote.id, name: remote.name, size: remote.size };
     } finally { stream.destroy(); }
   }
   async publish(releaseId: string) {
@@ -213,6 +224,7 @@ export class GitHubReleasePublisher implements ReleasePublisher {
     let id: string | undefined = recoveryId, stage = 'CHECK_PUBLIC_REPOSITORY';
     try {
       await this.transport.assertPublic?.();
+      assets = await prepareGitHubAssets(assets);
       if (recoveryId) {
         id = recoveryId; stage = 'VERIFY_PUBLISHED_RELEASE';
         if (!this.transport.reconcilePublished) throw new Error('GITHUB_RELEASE_CONFLICT');
@@ -230,15 +242,16 @@ export class GitHubReleasePublisher implements ReleasePublisher {
         stage = asset.kind === 'metadata' ? 'UPLOAD_LATEST_YML' : `UPLOAD_${asset.kind.toUpperCase()}`;
         const uploaded = await this.transport.upload(id, asset);
         urls[asset.kind] = uploaded.browserDownloadUrl;
-        published.push({ id: uploaded.id ?? '', name: asset.name, kind: asset.kind, size: asset.size, downloadUrl: uploaded.browserDownloadUrl });
+        published.push({ id: uploaded.id ?? '', name: uploaded.name ?? asset.name, sourceName: asset.sourceName ?? asset.name, kind: asset.kind, size: uploaded.size ?? asset.size, downloadUrl: uploaded.browserDownloadUrl });
       }
       stage = 'VERIFY_ASSETS'; await this.transport.verify?.(id, published);
       stage = 'PUBLISH_RELEASE'; await this.transport.publish(id);
-      stage = 'DOWNLOAD_VERIFY'; await this.transport.verifyDownload?.(urls.installer!);
+      stage = 'DOWNLOAD_VERIFY';
+      for (const asset of published) await this.transport.verifyDownload?.(asset.downloadUrl);
       return { assets: published, dryRun: false, githubReleaseId: id, installerUrl: urls.installer!, metadataUrl: urls.metadata!, steps: ['CREATE_DRAFT', 'UPLOAD_ALL', 'PUBLISH'] };
     } catch (error) {
       if (id && !recoveryId && stage !== 'DOWNLOAD_VERIFY') { try { await this.transport.remove?.(id); } catch { /* Safe release id retained for recovery. */ } }
-      const safeReasons = ['GITHUB_RELEASE_CONFLICT', 'GITHUB_ASSETS_INCOMPLETE', 'INVALID_GITHUB_RESPONSE', 'INVALID_GITHUB_ASSET', 'INVALID_GITHUB_DOWNLOAD_URL', 'GITHUB_RELEASE_NOT_PUBLISHED', 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED', 'GITHUB_DOWNLOAD_HTTP_ERROR', 'GITHUB_DOWNLOAD_NETWORK_ERROR', 'GITHUB_DOWNLOAD_TIMEOUT', 'GITHUB_DOWNLOAD_INVALID_REDIRECT', 'GITHUB_DOWNLOAD_REDIRECT_LIMIT', 'PUBLIC_UPDATES_REPOSITORY_REQUIRED'];
+      const safeReasons = ['GITHUB_RELEASE_CONFLICT', 'GITHUB_METADATA_RECONCILIATION_REQUIRED', 'GITHUB_ASSETS_INCOMPLETE', 'INVALID_GITHUB_RESPONSE', 'INVALID_GITHUB_ASSET', 'INVALID_GITHUB_DOWNLOAD_URL', 'GITHUB_RELEASE_NOT_PUBLISHED', 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED', 'GITHUB_DOWNLOAD_HTTP_ERROR', 'GITHUB_DOWNLOAD_NETWORK_ERROR', 'GITHUB_DOWNLOAD_TIMEOUT', 'GITHUB_DOWNLOAD_INVALID_REDIRECT', 'GITHUB_DOWNLOAD_REDIRECT_LIMIT', 'PUBLIC_UPDATES_REPOSITORY_REQUIRED'];
       throw new PartialPublicationError(id, error instanceof GitHubRequestError ? error.stage ?? stage : stage, error instanceof Error && safeReasons.includes(error.message) ? error.message : undefined, error instanceof GitHubRequestError ? error.status : undefined, error instanceof GitHubRequestError ? error.code : undefined);
     }
   }
