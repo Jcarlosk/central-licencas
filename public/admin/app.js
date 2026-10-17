@@ -49,7 +49,7 @@
     if (response.status === 401 && token) { logout('Sua sessão expirou. Entre novamente.'); throw new Error(errors.UNAUTHORIZED); }
     const result = await response.json().catch(() => null);
     if (!response.ok && result?.error === 'REAL_PUBLICATION_FAILED') {
-      const stages = ['CHECK_PUBLIC_REPOSITORY', 'CHECK_EXISTING_RELEASE', 'CREATE_RELEASE', 'CLEAN_DRAFT_ASSETS', 'UPLOAD_INSTALLER', 'UPLOAD_LATEST_YML', 'UPLOAD_BLOCKMAP', 'VERIFY_ASSETS', 'PUBLISH_RELEASE', 'DOWNLOAD_VERIFY', 'PERSIST_PUBLICATION'];
+      const stages = ['CHECK_PUBLIC_REPOSITORY', 'CHECK_EXISTING_RELEASE', 'CREATE_RELEASE', 'CLEAN_DRAFT_ASSETS', 'UPLOAD_INSTALLER', 'UPLOAD_LATEST_YML', 'UPLOAD_BLOCKMAP', 'VERIFY_ASSETS', 'VERIFY_PUBLISHED_RELEASE', 'PUBLISH_RELEASE', 'DOWNLOAD_VERIFY', 'PERSIST_PUBLICATION'];
       if (stages.includes(result.stage)) throw new Error(`Publica\u00e7\u00e3o falhou na etapa ${result.stage}.${Number.isInteger(result.githubStatus) && result.githubStatus >= 100 && result.githubStatus <= 599 ? ` GitHub respondeu ${result.githubStatus}.` : ''}`);
     }
     if (!response.ok || !result?.success) throw new Error(errors[result?.error] ?? 'Não foi possível concluir a solicitação. Tente novamente.');

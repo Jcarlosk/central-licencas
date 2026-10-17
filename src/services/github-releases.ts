@@ -3,6 +3,9 @@ import type { UpdateAsset } from './update-files.js';
 import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 
+// Exact HTTPS origins only. GitHub's browser download URL redirects to its release asset CDN.
+const downloadOrigins = new Set(['https://github.com', 'https://release-assets.githubusercontent.com']);
+
 export class GitHubRequestError extends Error {
   constructor(public readonly status: number | undefined, public readonly code?: string, public readonly stage?: string, message = 'GITHUB_REQUEST_FAILED') { super(message); }
 }
@@ -28,6 +31,7 @@ export interface GitHubReleaseTransport {
   assertPublic?(): Promise<void>;
   verify?(releaseId: string, assets: PublishedAsset[]): Promise<void>;
   verifyDownload?(url: string): Promise<void>;
+  reconcilePublished?(id: string, input: ReleaseInput, assets: UpdateAsset[]): Promise<PublishedAsset[]>;
   remove?(releaseId: string): Promise<void>;
   createDraft(input: { tag_name: string; name: string; body: string; prerelease: boolean }): Promise<{ id: string }>;
   upload(releaseId: string, asset: UpdateAsset): Promise<{ browserDownloadUrl: string; id?: string }>;
@@ -59,20 +63,66 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
   private releaseId(id: string) { if (!/^[1-9][0-9]*$/.test(id)) throw new Error('INVALID_GITHUB_RELEASE_ID'); return id; }
   async verifyDownload(url: string) {
     // No GitHub credentials are sent to browser/CDN URLs, including redirects.
-    let status: number | undefined;
+    let status: number | undefined, redirects = 0, initialOrigin: string | null = null, finalOrigin: string | null = null;
+    let reason = 'GITHUB_DOWNLOAD_INVALID_REDIRECT', awaitingHttp = false;
     try {
-      for (let redirects = 0; redirects <= 5; redirects++) {
+      initialOrigin = new URL(url).origin;
+      console.info('[UPDATES] download verification start', { initialOrigin });
+      for (;;) {
         const u = new URL(url);
-        if (!['https://github.com', 'https://release-assets.githubusercontent.com'].includes(u.origin) || u.username || u.password || u.hash) throw new Error();
-        const response = await this.http(u, { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(30000) });
+        finalOrigin = u.origin;
+        if (!downloadOrigins.has(u.origin) || u.username || u.password || u.hash) { reason = 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED'; status = undefined; throw new Error(); }
+        status = undefined; awaitingHttp = true;
+        let response = await this.http(u, { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(30000) });
+        awaitingHttp = false;
+        // Some download frontends reject HEAD. Confirm with a bounded GET, using
+        // identical origin/redirect checks and cancelling the body immediately.
+        if ([404, 405].includes(response.status)) {
+          console.info('[UPDATES] download verification probe', { origin: u.origin, status: response.status, redirects });
+          awaitingHttp = true;
+          response = await this.http(u, { method: 'GET', headers: { Range: 'bytes=0-0' }, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+          awaitingHttp = false;
+          await response.body?.cancel();
+        }
         status = response.status;
-        if (response.status === 200) return;
+        if ([200, 206].includes(status)) {
+          console.info('[UPDATES] download verification complete', { initialOrigin, finalOrigin, status, redirects }); return;
+        }
         const location = response.headers.get('location');
-        if (![301, 302, 303, 307, 308].includes(response.status) || !location) throw new Error();
-        url = new URL(location, u).toString();
+        if (![301, 302, 303, 307, 308].includes(status)) { reason = 'GITHUB_DOWNLOAD_HTTP_ERROR'; throw new Error(); }
+        if (!location) { reason = 'GITHUB_DOWNLOAD_INVALID_REDIRECT'; throw new Error(); }
+        const next = new URL(location, u);
+        redirects++;
+        console.info('[UPDATES] download verification redirect', { fromOrigin: u.origin, toOrigin: next.origin, status, redirects });
+        if (!downloadOrigins.has(next.origin) || next.username || next.password || next.hash) {
+          finalOrigin = next.origin; reason = 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED'; status = undefined; throw new Error();
+        }
+        if (redirects > 5) { reason = 'GITHUB_DOWNLOAD_REDIRECT_LIMIT'; throw new Error(); }
+        url = next.toString();
       }
-    } catch { /* Never expose CDN signed URLs or transport errors. */ }
-    throw new GitHubRequestError(status, 'download_unverified', 'DOWNLOAD_VERIFY', 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED');
+    } catch (error) {
+      if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) reason = 'GITHUB_DOWNLOAD_TIMEOUT';
+      else if (awaitingHttp) { reason = 'GITHUB_DOWNLOAD_NETWORK_ERROR'; status = undefined; }
+      // Never log URL paths, query strings, Location headers or exception messages.
+      console.info('[UPDATES] download verification failed', { initialOrigin, finalOrigin, status: status ?? null, redirects, reason });
+    }
+    throw new GitHubRequestError(status, 'download_unverified', 'DOWNLOAD_VERIFY', reason);
+  }
+  async reconcilePublished(id: string, input: ReleaseInput, assets: UpdateAsset[]): Promise<PublishedAsset[]> {
+    const value = await this.request(`https://api.github.com${this.repository}/${this.releaseId(id)}`, { method: 'GET' }, 'VERIFY_PUBLISHED_RELEASE');
+    const key = createHash('sha256').update(JSON.stringify([input.productId, input.version, input.channel])).digest('hex');
+    if (String(value.id) !== id || value.draft !== false || value.tag_name !== `v${input.version}` || value.prerelease !== (input.channel === 'beta') || value.body !== `${input.notes}\n\n<!-- central-licencas:${key} -->` || !Array.isArray(value.assets) || value.assets.length !== 3 || assets.length !== 3 || new Set(assets.map(a => a.kind)).size !== 3) throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', 'GITHUB_RELEASE_CONFLICT');
+    const published: PublishedAsset[] = [];
+    for (const asset of assets) {
+      const hash = createHash('sha256');
+      for await (const chunk of createReadStream(asset.path)) hash.update(chunk);
+      const remote = value.assets.find((a: any) => a.name === asset.name);
+      const expectedUrl = `https://github.com/${this.config.owner}/${this.config.repo}/releases/download/v${input.version}/${encodeURIComponent(asset.name)}`;
+      if (!remote || !Number.isSafeInteger(remote.id) || remote.id <= 0 || remote.state !== 'uploaded' || remote.size !== asset.size || remote.digest !== `sha256:${hash.digest('hex')}` || remote.browser_download_url !== expectedUrl) throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', 'GITHUB_ASSETS_INCOMPLETE');
+      published.push({ id: String(remote.id), name: asset.name, kind: asset.kind, size: asset.size, downloadUrl: remote.browser_download_url });
+    }
+    if (new Set(published.map(a => a.id)).size !== 3) throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', 'GITHUB_ASSETS_INCOMPLETE');
+    return published;
   }
   async assertPublic() {
     const repo = await this.request(`https://api.github.com/repos/${this.config.owner}/${this.config.repo}`, { method: 'GET' });
@@ -159,10 +209,18 @@ export class PartialPublicationError extends Error {
 }
 export class GitHubReleasePublisher implements ReleasePublisher {
   constructor(private readonly transport: GitHubReleaseTransport) {}
-  async publish(input: ReleaseInput, assets: UpdateAsset[]): Promise<PublicationResult> {
-    let id: string | undefined, stage = 'CHECK_PUBLIC_REPOSITORY';
+  async publish(input: ReleaseInput, assets: UpdateAsset[], recoveryId?: string): Promise<PublicationResult> {
+    let id: string | undefined = recoveryId, stage = 'CHECK_PUBLIC_REPOSITORY';
     try {
       await this.transport.assertPublic?.();
+      if (recoveryId) {
+        id = recoveryId; stage = 'VERIFY_PUBLISHED_RELEASE';
+        if (!this.transport.reconcilePublished) throw new Error('GITHUB_RELEASE_CONFLICT');
+        const recovered = await this.transport.reconcilePublished(id, input, assets);
+        stage = 'DOWNLOAD_VERIFY';
+        for (const asset of recovered) await this.transport.verifyDownload?.(asset.downloadUrl);
+        return { dryRun: false, assets: recovered, githubReleaseId: id, installerUrl: recovered.find(a => a.kind === 'installer')!.downloadUrl, metadataUrl: recovered.find(a => a.kind === 'metadata')!.downloadUrl, steps: ['RECONCILE_EXISTING_RELEASE', 'VERIFY_ASSETS', 'DOWNLOAD_VERIFY'] };
+      }
       stage = 'CREATE_RELEASE';
       const key = createHash('sha256').update(JSON.stringify([input.productId, input.version, input.channel])).digest('hex');
       id = (await this.transport.createDraft({ tag_name: `v${input.version}`, name: `Sistema de Atendimento ${input.version}`, body: `${input.notes}\n\n<!-- central-licencas:${key} -->`, prerelease: input.channel === 'beta' })).id;
@@ -179,8 +237,8 @@ export class GitHubReleasePublisher implements ReleasePublisher {
       stage = 'DOWNLOAD_VERIFY'; await this.transport.verifyDownload?.(urls.installer!);
       return { assets: published, dryRun: false, githubReleaseId: id, installerUrl: urls.installer!, metadataUrl: urls.metadata!, steps: ['CREATE_DRAFT', 'UPLOAD_ALL', 'PUBLISH'] };
     } catch (error) {
-      if (id) { try { await this.transport.remove?.(id); } catch { /* Safe release id retained for manual recovery. */ } }
-      const safeReasons = ['GITHUB_RELEASE_CONFLICT', 'GITHUB_ASSETS_INCOMPLETE', 'INVALID_GITHUB_RESPONSE', 'INVALID_GITHUB_ASSET', 'INVALID_GITHUB_DOWNLOAD_URL', 'GITHUB_RELEASE_NOT_PUBLISHED', 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED', 'PUBLIC_UPDATES_REPOSITORY_REQUIRED'];
+      if (id && !recoveryId && stage !== 'DOWNLOAD_VERIFY') { try { await this.transport.remove?.(id); } catch { /* Safe release id retained for recovery. */ } }
+      const safeReasons = ['GITHUB_RELEASE_CONFLICT', 'GITHUB_ASSETS_INCOMPLETE', 'INVALID_GITHUB_RESPONSE', 'INVALID_GITHUB_ASSET', 'INVALID_GITHUB_DOWNLOAD_URL', 'GITHUB_RELEASE_NOT_PUBLISHED', 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED', 'GITHUB_DOWNLOAD_HTTP_ERROR', 'GITHUB_DOWNLOAD_NETWORK_ERROR', 'GITHUB_DOWNLOAD_TIMEOUT', 'GITHUB_DOWNLOAD_INVALID_REDIRECT', 'GITHUB_DOWNLOAD_REDIRECT_LIMIT', 'PUBLIC_UPDATES_REPOSITORY_REQUIRED'];
       throw new PartialPublicationError(id, error instanceof GitHubRequestError ? error.stage ?? stage : stage, error instanceof Error && safeReasons.includes(error.message) ? error.message : undefined, error instanceof GitHubRequestError ? error.status : undefined, error instanceof GitHubRequestError ? error.code : undefined);
     }
   }

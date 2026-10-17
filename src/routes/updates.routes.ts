@@ -105,6 +105,7 @@ export function updatesRoutes({ db, env }: Context) {
       const transport = real ? new GitHubHttpTransport({ token: env.GITHUB_UPDATES_TOKEN!, owner: env.GITHUB_UPDATES_OWNER!, repo: env.GITHUB_UPDATES_REPO! }) : undefined;
       let publishedId: string | undefined;
       let replayed = false;
+      let reconciled = false;
       try {
         const updated = await db.$transaction(async tx => {
           // Serialize publication across processes; editing/disable cannot win during publication.
@@ -120,7 +121,10 @@ export function updatesRoutes({ db, env }: Context) {
           await tx.$queryRaw`SELECT id FROM "Product" WHERE id = ${initial.productId}::uuid FOR SHARE`;
           const product = await tx.product.findUnique({ where: { id: initial.productId } });
           if (!product?.active) throw new ApiError(409, 'INACTIVE_ENTITY');
-          const result = await (transport ? new GitHubReleasePublisher(transport) : new DryRunPublisher()).publish(initial, prepared);
+          const previous = current.publicationLog as { releaseId?: unknown; stage?: unknown } | null;
+          const recoveryId = real && ['DOWNLOAD_VERIFY', 'VERIFY_PUBLISHED_RELEASE', 'PERSIST_PUBLICATION', 'CHECK_PUBLIC_REPOSITORY'].includes(String(previous?.stage)) && typeof previous?.releaseId === 'string' && /^[1-9][0-9]*$/.test(previous.releaseId) ? previous.releaseId : undefined;
+          const result = await (transport ? new GitHubReleasePublisher(transport).publish(initial, prepared, recoveryId) : new DryRunPublisher().publish(initial, prepared));
+          reconciled = result.steps.includes('RECONCILE_EXISTING_RELEASE');
           publishedId = result.githubReleaseId;
           const summaryAssets = validated.assets.map(asset => ({ ...asset, sourceName: assets.find(a => a.kind === asset.kind)!.name, ...(result.assets?.find(a => a.kind === asset.kind) ?? {}) }));
           if (real && (!result.installerUrl || !result.metadataUrl || !publishedId || summaryAssets.some(a => !('id' in a) || !a.id))) throw new ApiError(502, 'UPDATE_METADATA_UNAVAILABLE');
@@ -132,7 +136,7 @@ export function updatesRoutes({ db, env }: Context) {
         }, { timeout: 1_200_000, maxWait: 5000 });
         res.json({ success: true, data: updated, dryRun: !real, replayed, steps: replayed ? ['IDEMPOTENT_REPLAY'] : (updated.publicationLog as { steps: string[] }).steps });
       } catch (error) {
-        if (publishedId && transport) { try { await transport.remove(publishedId); } catch { /* Log safe recovery id below. */ } }
+        if (publishedId && transport && !reconciled) { try { await transport.remove(publishedId); } catch { /* Log safe recovery id below. */ } }
         if (real && !(error instanceof ApiError)) {
           const diagnostic = publicationDiagnostic(error);
           const githubId = error instanceof PartialPublicationError ? error.releaseId : publishedId;
