@@ -34,7 +34,7 @@ export interface GitHubReleaseTransport {
   verifyDownload?(url: string): Promise<void>;
   reconcilePublished?(id: string, input: ReleaseInput, assets: UpdateAsset[]): Promise<PublishedAsset[]>;
   remove?(releaseId: string): Promise<void>;
-  createDraft(input: { tag_name: string; name: string; body: string; prerelease: boolean }): Promise<{ id: string }>;
+  createDraft(input: { tag_name: string; name: string; body: string; prerelease: boolean }): Promise<{ id: string; published?: boolean }>;
   upload(releaseId: string, asset: UpdateAsset): Promise<{ browserDownloadUrl: string; id?: string; name?: string; size?: number }>;
   publish(releaseId: string): Promise<void>;
 }
@@ -123,18 +123,33 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
   async reconcilePublished(id: string, input: ReleaseInput, assets: UpdateAsset[]): Promise<PublishedAsset[]> {
     const value = await this.request(`https://api.github.com${this.repository}/${this.releaseId(id)}`, { method: 'GET' }, 'VERIFY_PUBLISHED_RELEASE');
     const key = createHash('sha256').update(JSON.stringify([input.productId, input.version, input.channel])).digest('hex');
-    if (String(value.id) !== id || value.draft !== false || value.tag_name !== `v${input.version}` || value.prerelease !== (input.channel === 'beta') || value.body !== `${input.notes}\n\n<!-- central-licencas:${key} -->` || !Array.isArray(value.assets) || value.assets.length !== 3 || assets.length !== 3 || new Set(assets.map(a => a.kind)).size !== 3) throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', 'GITHUB_RELEASE_CONFLICT');
+    const fail = (reason: string): never => { throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', reason); };
+    if (String(value.id) !== id) fail('RELEASE_ID_MISMATCH');
+    if (value.tag_name !== `v${input.version}`) fail('RELEASE_TAG_CONFLICT');
+    if (value.draft !== false) fail('RELEASE_NOT_PUBLISHED');
+    if (value.prerelease !== (input.channel === 'beta')) fail('RELEASE_METADATA_MISMATCH');
+    // Published releases can be adopted by exact package proof even without our
+    // marker. Never adopt a release explicitly marked for a different product/channel.
+    const marker = typeof value.body === 'string' ? value.body.match(/<!-- central-licencas:([a-f0-9]{64}) -->/)?.[1] : undefined;
+    if (marker && marker !== key) fail('UNMANAGED_PUBLISHED_RELEASE');
+    if (!Array.isArray(value.assets) || value.assets.length !== 3 || assets.length !== 3 || new Set(assets.map(a => a.kind)).size !== 3) fail('RELEASE_ASSET_MISMATCH');
+    const remoteAssets = value.assets as any[];
+    if (new Set(remoteAssets.map(a => a.name)).size !== 3) fail('RELEASE_ASSET_MISMATCH');
     const published: PublishedAsset[] = [];
     for (const asset of assets) {
       const hash = createHash('sha256');
       for await (const chunk of createReadStream(asset.path)) hash.update(chunk);
       const digest = `sha256:${hash.digest('hex')}`;
-      const candidates = value.assets.filter((a: any) => a.size === asset.size && a.digest === digest && a.state === 'uploaded' && a.name === githubAssetName(asset.name));
-      if (candidates.length !== 1) throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', asset.kind === 'metadata' ? 'GITHUB_METADATA_RECONCILIATION_REQUIRED' : 'GITHUB_ASSETS_INCOMPLETE');
-      const remote = this.remoteAsset(candidates[0], asset.kind, `v${input.version}`);
-      published.push({ ...remote, sourceName: asset.sourceName ?? asset.name });
+      const candidates = remoteAssets.filter(a => a.name === githubAssetName(asset.name));
+      if (candidates.length !== 1 || candidates[0].state !== 'uploaded') fail('RELEASE_ASSET_MISMATCH');
+      if (candidates[0].size !== asset.size) fail(asset.kind === 'metadata' ? 'LATEST_YML_MISMATCH' : 'RELEASE_SIZE_MISMATCH');
+      if (candidates[0].digest !== digest) fail(asset.kind === 'metadata' ? 'LATEST_YML_MISMATCH' : 'RELEASE_HASH_MISMATCH');
+      let remote: PublishedAsset;
+      try { remote = this.remoteAsset(candidates[0], asset.kind, `v${input.version}`); }
+      catch { fail('RELEASE_ASSET_MISMATCH'); }
+      published.push({ ...remote!, sourceName: asset.sourceName ?? asset.name });
     }
-    if (new Set(published.map(a => a.id)).size !== 3) throw new GitHubRequestError(undefined, undefined, 'VERIFY_PUBLISHED_RELEASE', 'GITHUB_ASSETS_INCOMPLETE');
+    if (new Set(published.map(a => a.id)).size !== 3) fail('RELEASE_ASSET_MISMATCH');
     return published;
   }
   async assertPublic() {
@@ -152,7 +167,7 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
       if (!release.assets.some((a: any) => String(a.id) === asset.id && a.name === asset.name && a.size === asset.size && a.state === 'uploaded' && a.browser_download_url === asset.downloadUrl)) throw new Error('GITHUB_ASSETS_INCOMPLETE');
     }
   }
-  async createDraft(input: { tag_name: string; name: string; body: string; prerelease: boolean }, recoveryOnly = false): Promise<{ id: string }> {
+  async createDraft(input: { tag_name: string; name: string; body: string; prerelease: boolean }, recoveryOnly = false): Promise<{ id: string; published?: boolean }> {
     // List releases: the by-tag endpoint only returns published releases, not drafts.
     const matches: Record<string, unknown>[] = [];
     for (let page = 1; ; page++) {
@@ -163,9 +178,13 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
     }
     if (matches.length) {
       const existing = matches[0]!;
-      const marker = input.body.match(/<!-- central-licencas:[a-f0-9]{64} -->$/)?.[0];
-      if (matches.length !== 1 || existing.draft !== true || !marker || existing.body !== input.body || existing.name !== input.name || existing.prerelease !== input.prerelease) throw new GitHubRequestError(undefined, undefined, 'CHECK_EXISTING_RELEASE', 'GITHUB_RELEASE_CONFLICT');
+      if (matches.length !== 1) throw new GitHubRequestError(undefined, undefined, 'CHECK_EXISTING_RELEASE', 'MULTIPLE_RELEASE_CANDIDATES');
       if (!Number.isSafeInteger(existing.id) || Number(existing.id) <= 0) throw new GitHubRequestError(undefined, 'invalid_response', 'CHECK_EXISTING_RELEASE', 'INVALID_GITHUB_RESPONSE');
+      // Discovery never mutates a published candidate. The publisher verifies
+      // its complete package before associating it with the Central record.
+      if (existing.draft === false) return { id: String(existing.id), published: true };
+      const marker = input.body.match(/<!-- central-licencas:[a-f0-9]{64} -->$/)?.[0];
+      if (existing.draft !== true || !marker || existing.body !== input.body || existing.name !== input.name || existing.prerelease !== input.prerelease) throw new GitHubRequestError(undefined, undefined, 'CHECK_EXISTING_RELEASE', 'RELEASE_METADATA_MISMATCH');
       const id = String(existing.id);
       // Restart owned drafts with a clean asset set, including ambiguous/failed uploads.
       const staleAssets: Record<string, unknown>[] = [];
@@ -222,20 +241,26 @@ export class GitHubReleasePublisher implements ReleasePublisher {
   constructor(private readonly transport: GitHubReleaseTransport) {}
   async publish(input: ReleaseInput, assets: UpdateAsset[], recoveryId?: string): Promise<PublicationResult> {
     let id: string | undefined = recoveryId, stage = 'CHECK_PUBLIC_REPOSITORY';
+    let reconciling = !!recoveryId;
+    const reconcile = async (): Promise<PublicationResult> => {
+      reconciling = true; stage = 'VERIFY_PUBLISHED_RELEASE';
+      if (!this.transport.reconcilePublished) throw new Error('GITHUB_RELEASE_CONFLICT');
+      const recovered = await this.transport.reconcilePublished(id!, input, assets);
+      stage = 'DOWNLOAD_VERIFY';
+      for (const asset of recovered) await this.transport.verifyDownload?.(asset.downloadUrl);
+      return { dryRun: false, assets: recovered, githubReleaseId: id!, installerUrl: recovered.find(a => a.kind === 'installer')!.downloadUrl, metadataUrl: recovered.find(a => a.kind === 'metadata')!.downloadUrl, steps: ['RECONCILE_EXISTING_RELEASE', 'VERIFY_ASSETS', 'DOWNLOAD_VERIFY'] };
+    };
     try {
       await this.transport.assertPublic?.();
       assets = await prepareGitHubAssets(assets);
       if (recoveryId) {
-        id = recoveryId; stage = 'VERIFY_PUBLISHED_RELEASE';
-        if (!this.transport.reconcilePublished) throw new Error('GITHUB_RELEASE_CONFLICT');
-        const recovered = await this.transport.reconcilePublished(id, input, assets);
-        stage = 'DOWNLOAD_VERIFY';
-        for (const asset of recovered) await this.transport.verifyDownload?.(asset.downloadUrl);
-        return { dryRun: false, assets: recovered, githubReleaseId: id, installerUrl: recovered.find(a => a.kind === 'installer')!.downloadUrl, metadataUrl: recovered.find(a => a.kind === 'metadata')!.downloadUrl, steps: ['RECONCILE_EXISTING_RELEASE', 'VERIFY_ASSETS', 'DOWNLOAD_VERIFY'] };
+        return await reconcile();
       }
       stage = 'CREATE_RELEASE';
       const key = createHash('sha256').update(JSON.stringify([input.productId, input.version, input.channel])).digest('hex');
-      id = (await this.transport.createDraft({ tag_name: `v${input.version}`, name: `Sistema de Atendimento ${input.version}`, body: `${input.notes}\n\n<!-- central-licencas:${key} -->`, prerelease: input.channel === 'beta' })).id;
+      const candidate = await this.transport.createDraft({ tag_name: `v${input.version}`, name: `Sistema de Atendimento ${input.version}`, body: `${input.notes}\n\n<!-- central-licencas:${key} -->`, prerelease: input.channel === 'beta' });
+      id = candidate.id;
+      if (candidate.published) return await reconcile();
       const urls: Partial<Record<UpdateAsset['kind'], string>> = {};
       const published: PublishedAsset[] = [];
       for (const asset of [...assets].sort((a, b) => ['installer', 'metadata', 'blockmap'].indexOf(a.kind) - ['installer', 'metadata', 'blockmap'].indexOf(b.kind))) {
@@ -250,8 +275,8 @@ export class GitHubReleasePublisher implements ReleasePublisher {
       for (const asset of published) await this.transport.verifyDownload?.(asset.downloadUrl);
       return { assets: published, dryRun: false, githubReleaseId: id, installerUrl: urls.installer!, metadataUrl: urls.metadata!, steps: ['CREATE_DRAFT', 'UPLOAD_ALL', 'PUBLISH'] };
     } catch (error) {
-      if (id && !recoveryId && stage !== 'DOWNLOAD_VERIFY') { try { await this.transport.remove?.(id); } catch { /* Safe release id retained for recovery. */ } }
-      const safeReasons = ['GITHUB_RELEASE_CONFLICT', 'GITHUB_METADATA_RECONCILIATION_REQUIRED', 'GITHUB_ASSETS_INCOMPLETE', 'INVALID_GITHUB_RESPONSE', 'INVALID_GITHUB_ASSET', 'INVALID_GITHUB_DOWNLOAD_URL', 'GITHUB_RELEASE_NOT_PUBLISHED', 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED', 'GITHUB_DOWNLOAD_HTTP_ERROR', 'GITHUB_DOWNLOAD_NETWORK_ERROR', 'GITHUB_DOWNLOAD_TIMEOUT', 'GITHUB_DOWNLOAD_INVALID_REDIRECT', 'GITHUB_DOWNLOAD_REDIRECT_LIMIT', 'PUBLIC_UPDATES_REPOSITORY_REQUIRED'];
+      if (id && !reconciling && stage !== 'DOWNLOAD_VERIFY') { try { await this.transport.remove?.(id); } catch { /* Safe release id retained for recovery. */ } }
+      const safeReasons = ['MULTIPLE_RELEASE_CANDIDATES', 'RELEASE_TAG_CONFLICT', 'RELEASE_ID_MISMATCH', 'RELEASE_NOT_PUBLISHED', 'RELEASE_METADATA_MISMATCH', 'RELEASE_ASSET_MISMATCH', 'RELEASE_SIZE_MISMATCH', 'RELEASE_HASH_MISMATCH', 'LATEST_YML_MISMATCH', 'UNMANAGED_PUBLISHED_RELEASE', 'GITHUB_RELEASE_CONFLICT', 'GITHUB_METADATA_RECONCILIATION_REQUIRED', 'GITHUB_ASSETS_INCOMPLETE', 'INVALID_GITHUB_RESPONSE', 'INVALID_GITHUB_ASSET', 'INVALID_GITHUB_DOWNLOAD_URL', 'GITHUB_RELEASE_NOT_PUBLISHED', 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED', 'GITHUB_DOWNLOAD_HTTP_ERROR', 'GITHUB_DOWNLOAD_NETWORK_ERROR', 'GITHUB_DOWNLOAD_TIMEOUT', 'GITHUB_DOWNLOAD_INVALID_REDIRECT', 'GITHUB_DOWNLOAD_REDIRECT_LIMIT', 'PUBLIC_UPDATES_REPOSITORY_REQUIRED'];
       throw new PartialPublicationError(id, error instanceof GitHubRequestError ? error.stage ?? stage : stage, error instanceof Error && safeReasons.includes(error.message) ? error.message : undefined, error instanceof GitHubRequestError ? error.status : undefined, error instanceof GitHubRequestError ? error.code : undefined);
     }
   }
