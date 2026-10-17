@@ -14,6 +14,7 @@ import { DryRunPublisher, GitHubHttpTransport, GitHubReleasePublisher, PartialPu
 import { checkUpdates } from '../services/updates.js';
 import { assertUpdateReactivationSafe } from '../services/update-reactivation.js';
 import { reactivationPublicationLog, replacePublicationLog } from '../services/publication-log.js';
+import { publicationDiagnostic, RealPublicationApiError } from '../services/publication-diagnostics.js';
 
 export function publicUpdatesRoutes(ctx: Context) {
   const router = Router();
@@ -133,9 +134,15 @@ export function updatesRoutes({ db, env }: Context) {
       } catch (error) {
         if (publishedId && transport) { try { await transport.remove(publishedId); } catch { /* Log safe recovery id below. */ } }
         if (real && !(error instanceof ApiError)) {
-          const failure = error instanceof PartialPublicationError ? { stage: error.stage, releaseId: error.releaseId ?? null, reason: error.reason ?? null, githubStatus: error.githubStatus ?? null, githubCode: error.githubCode ?? null, tagPolicy: 'PRESERVE_AND_REUSE' } : { stage: 'PERSIST_METADATA', releaseId: publishedId ?? null };
-          await db.updateRelease.updateMany({ where: { id, status: 'DRAFT', updatedAt: initial.updatedAt }, data: { publicationLog: replacePublicationLog(initial.publicationLog, { mode: 'REAL', failed: true, ...failure }) } });
-          throw new ApiError(502, 'REAL_PUBLICATION_FAILED');
+          const diagnostic = publicationDiagnostic(error);
+          const githubId = error instanceof PartialPublicationError ? error.releaseId : publishedId;
+          const releaseId = githubId && /^[1-9][0-9]*$/.test(githubId) ? githubId : null;
+          console.error('[UPDATES] real publication failed', { releaseId: id, version: initial.version, githubReleaseId: releaseId, ...diagnostic });
+          const failure = { releaseId, ...diagnostic, tagPolicy: 'PRESERVE_AND_REUSE' };
+          try {
+            await db.updateRelease.updateMany({ where: { id, status: 'DRAFT', updatedAt: initial.updatedAt }, data: { publicationLog: replacePublicationLog(initial.publicationLog, { mode: 'REAL', failed: true, ...failure }) } });
+          } catch { console.error('[UPDATES] publication diagnostic persistence failed', { releaseId: id, code: 'PUBLICATION_DIAGNOSTIC_PERSIST_FAILED' }); }
+          throw new RealPublicationApiError(diagnostic);
         }
         throw error;
       }

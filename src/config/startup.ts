@@ -9,6 +9,10 @@ export function logStartupConfiguration(env: NodeJS.ProcessEnv = process.env, lo
   const mode = env.NODE_ENV === undefined ? 'development'
     : ['production', 'development', 'test'].includes(env.NODE_ENV) ? env.NODE_ENV : 'invalid';
   log(`[STARTUP] NODE_ENV: ${mode}`);
+  log(`[STARTUP] GITHUB_UPDATES_ENABLED: ${env.GITHUB_UPDATES_ENABLED === 'true'}`);
+  for (const field of ['GITHUB_UPDATES_TOKEN', 'GITHUB_UPDATES_OWNER', 'GITHUB_UPDATES_REPO']) {
+    log(`[STARTUP] ${field}: ${env[field] ? 'configured' : 'missing'}`);
+  }
   for (const field of ['DATABASE_URL', 'JWT_SECRET', ...keyFields]) {
     log(`[STARTUP] ${field}: ${env[field] ? 'configured' : 'missing'}`);
     if (field === 'DATABASE_URL') log(`[STARTUP] DATABASE_URL scheme: ${databaseUrlScheme(env.DATABASE_URL)}`);

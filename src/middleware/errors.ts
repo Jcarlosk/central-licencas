@@ -2,7 +2,9 @@ import { Prisma } from '@prisma/client';
 import type { ErrorRequestHandler } from 'express';
 import { ZodError } from 'zod';
 import { ApiError } from '../utils/errors.js';
+import { RealPublicationApiError } from '../services/publication-diagnostics.js';
 export const errorHandler: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
+  if (error instanceof RealPublicationApiError) { res.status(502).json({ success: false, error: error.code, ...error.diagnostic }); return; }
   if (error instanceof ApiError) { res.status(error.status).json({ success: false, error: error.code }); return; }
   if (error instanceof ZodError) {
     res.status(400).json({ success: false, error: 'VALIDATION_ERROR', fields: error.issues.map(i => ({ path: i.path.join('.'), code: i.code })) }); return;
