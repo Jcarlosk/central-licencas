@@ -12,6 +12,8 @@ import { ApiError } from '../utils/errors.js';
 import { validateAssetName, validateUpdateAssets, prepareGitHubAssets, MAX_FILE_BYTES, type UpdateAsset } from '../services/update-files.js';
 import { DryRunPublisher, GitHubHttpTransport, GitHubReleasePublisher, PartialPublicationError } from '../services/github-releases.js';
 import { checkUpdates } from '../services/updates.js';
+import { assertUpdateReactivationSafe } from '../services/update-reactivation.js';
+import { reactivationPublicationLog, replacePublicationLog } from '../services/publication-log.js';
 
 export function publicUpdatesRoutes(ctx: Context) {
   const router = Router();
@@ -46,8 +48,8 @@ export function updatesRoutes({ db, env }: Context) {
     const input = releaseBody.parse(req.body);
     if (input.productId !== existing.productId) throw new ApiError(400, 'PRODUCT_MISMATCH');
     // Compare-and-set: publication and editing cannot overwrite each other's state.
-    const result = await db.updateRelease.updateMany({ where: { id, status: 'DRAFT', githubReleaseId: null },
-      data: { ...input, githubTag: `v${input.version}`, sha256: null, publicationLog: [], installerUrl: null, metadataUrl: null } });
+    const result = await db.updateRelease.updateMany({ where: { id, status: 'DRAFT', githubReleaseId: null, updatedAt: existing.updatedAt },
+      data: { ...input, githubTag: `v${input.version}`, sha256: null, publicationLog: replacePublicationLog(existing.publicationLog, { mode: 'DRAFT', steps: ['EDIT_DRAFT'] }), installerUrl: null, metadataUrl: null } });
     if (!result.count) throw new ApiError(409, 'RELEASE_NOT_EDITABLE');
     res.json({ success: true, data: await db.updateRelease.findUniqueOrThrow({ where: { id } }) });
   });
@@ -57,6 +59,21 @@ export function updatesRoutes({ db, env }: Context) {
     const result = await db.updateRelease.updateMany({ where: { id, status: { in: ['DRAFT', 'PUBLISHED'] } }, data: { status: 'DISABLED' } });
     if (!result.count) throw new ApiError(409, 'INVALID_RELEASE_STATE');
     res.json({ success: true, data: await db.updateRelease.findUniqueOrThrow({ where: { id } }) });
+  });
+  router.post('/:id/reactivate', async (req, res) => {
+    const id = uuid.parse(req.params.id);
+    z.object({}).strict().parse(req.body);
+    const data = await db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM "UpdateRelease" WHERE id = ${id}::uuid FOR UPDATE`;
+      const current = await tx.updateRelease.findUnique({ where: { id } });
+      if (!current) throw new ApiError(404, 'NOT_FOUND');
+      if (current.status !== 'DISABLED') throw new ApiError(409, 'INVALID_RELEASE_STATE');
+      await assertUpdateReactivationSafe(current, { token: env.GITHUB_UPDATES_TOKEN ?? '', owner: env.GITHUB_UPDATES_OWNER ?? '', repo: env.GITHUB_UPDATES_REPO ?? '' });
+      // Snapshot and cleared distribution references are committed atomically on the same row.
+      const publicationLog = reactivationPublicationLog(current, res.locals.adminId as string);
+      return tx.updateRelease.update({ where: { id }, data: { status: 'DRAFT', dryRun: true, githubReleaseId: null, installerUrl: null, metadataUrl: null, sha256: null, publishedAt: null, publicationLog } });
+    }, { timeout: 240000, maxWait: 5000 });
+    res.json({ success: true, data });
   });
   router.post(['/:id/publish', '/:id/publish-real'], async (req, res) => {
     const real = req.path.endsWith('/publish-real');
@@ -108,7 +125,7 @@ export function updatesRoutes({ db, env }: Context) {
           if (real && (!result.installerUrl || !result.metadataUrl || !publishedId || summaryAssets.some(a => !('id' in a) || !a.id))) throw new ApiError(502, 'UPDATE_METADATA_UNAVAILABLE');
           return tx.updateRelease.update({ where: { id }, data: {
             sha256: validated.sha256, dryRun: !real,
-            publicationLog: { mode: real ? 'REAL' : 'DRY_RUN', steps: result.steps, assets: summaryAssets },
+            publicationLog: replacePublicationLog(current.publicationLog, { mode: real ? 'REAL' : 'DRY_RUN', steps: result.steps, assets: summaryAssets }),
             ...(real ? { status: 'PUBLISHED', githubReleaseId: publishedId, installerUrl: result.installerUrl, metadataUrl: result.metadataUrl, publishedAt: new Date() } : {}),
           } });
         }, { timeout: 1_200_000, maxWait: 5000 });
@@ -117,7 +134,7 @@ export function updatesRoutes({ db, env }: Context) {
         if (publishedId && transport) { try { await transport.remove(publishedId); } catch { /* Log safe recovery id below. */ } }
         if (real && !(error instanceof ApiError)) {
           const failure = error instanceof PartialPublicationError ? { stage: error.stage, releaseId: error.releaseId ?? null, reason: error.reason ?? null, githubStatus: error.githubStatus ?? null, githubCode: error.githubCode ?? null, tagPolicy: 'PRESERVE_AND_REUSE' } : { stage: 'PERSIST_METADATA', releaseId: publishedId ?? null };
-          await db.updateRelease.updateMany({ where: { id, status: 'DRAFT', updatedAt: initial.updatedAt }, data: { publicationLog: { mode: 'REAL', failed: true, ...failure } } });
+          await db.updateRelease.updateMany({ where: { id, status: 'DRAFT', updatedAt: initial.updatedAt }, data: { publicationLog: replacePublicationLog(initial.publicationLog, { mode: 'REAL', failed: true, ...failure }) } });
           throw new ApiError(502, 'REAL_PUBLICATION_FAILED');
         }
         throw error;
