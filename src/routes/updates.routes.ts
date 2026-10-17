@@ -64,7 +64,7 @@ export function updatesRoutes({ db, env }: Context) {
     const id = uuid.parse(req.params.id);
     const initial = await db.updateRelease.findUnique({ where: { id } });
     if (!initial) throw new ApiError(404, 'NOT_FOUND');
-    if (initial.status !== 'DRAFT' || initial.githubReleaseId) throw new ApiError(409, 'INVALID_RELEASE_STATE');
+    if (!(real && initial.status === 'PUBLISHED' && !initial.dryRun && initial.githubReleaseId) && (initial.status !== 'DRAFT' || initial.githubReleaseId)) throw new ApiError(409, 'INVALID_RELEASE_STATE');
     const directory = await mkdtemp(join(tmpdir(), 'central-update-'));
     try {
       const upload = multer({
@@ -86,11 +86,18 @@ export function updatesRoutes({ db, env }: Context) {
       if (real) validated = await validateUpdateAssets(prepared, initial.version, true);
       const transport = real ? new GitHubHttpTransport({ token: env.GITHUB_UPDATES_TOKEN!, owner: env.GITHUB_UPDATES_OWNER!, repo: env.GITHUB_UPDATES_REPO! }) : undefined;
       let publishedId: string | undefined;
+      let replayed = false;
       try {
         const updated = await db.$transaction(async tx => {
           // Serialize publication across processes; editing/disable cannot win during publication.
           await tx.$queryRaw`SELECT id FROM "UpdateRelease" WHERE id = ${id}::uuid FOR UPDATE`;
           const current = await tx.updateRelease.findUniqueOrThrow({ where: { id } });
+          if (real && current.status === 'PUBLISHED' && !current.dryRun && current.githubReleaseId) {
+            const log = z.object({ assets: z.array(z.object({ name: z.string(), kind: z.string(), size: z.number(), sha256: z.string(), sha512: z.string() })) }).safeParse(current.publicationLog);
+            if (!log.success || log.data.assets.length !== 3 || current.sha256 !== validated.sha256 || !validated.assets.every(asset => log.data.assets.some(saved => saved.kind === asset.kind && saved.name === asset.name && saved.size === asset.size && saved.sha256 === asset.sha256 && saved.sha512 === asset.sha512))) throw new ApiError(409, 'PUBLICATION_CONTENT_CONFLICT');
+            replayed = true;
+            return current;
+          }
           if (current.status !== 'DRAFT' || current.githubReleaseId || current.updatedAt.getTime() !== initial.updatedAt.getTime()) throw new ApiError(409, 'RELEASE_CHANGED');
           await tx.$queryRaw`SELECT id FROM "Product" WHERE id = ${initial.productId}::uuid FOR SHARE`;
           const product = await tx.product.findUnique({ where: { id: initial.productId } });
@@ -105,11 +112,11 @@ export function updatesRoutes({ db, env }: Context) {
             ...(real ? { status: 'PUBLISHED', githubReleaseId: publishedId, installerUrl: result.installerUrl, metadataUrl: result.metadataUrl, publishedAt: new Date() } : {}),
           } });
         }, { timeout: 1_200_000, maxWait: 5000 });
-        res.json({ success: true, data: updated, dryRun: !real, steps: (updated.publicationLog as { steps: string[] }).steps });
+        res.json({ success: true, data: updated, dryRun: !real, replayed, steps: replayed ? ['IDEMPOTENT_REPLAY'] : (updated.publicationLog as { steps: string[] }).steps });
       } catch (error) {
         if (publishedId && transport) { try { await transport.remove(publishedId); } catch { /* Log safe recovery id below. */ } }
         if (real && !(error instanceof ApiError)) {
-          const failure = error instanceof PartialPublicationError ? { stage: error.stage, releaseId: error.releaseId ?? null } : { stage: 'PERSIST_METADATA', releaseId: publishedId ?? null };
+          const failure = error instanceof PartialPublicationError ? { stage: error.stage, releaseId: error.releaseId ?? null, reason: error.reason ?? null, githubStatus: error.githubStatus ?? null, githubCode: error.githubCode ?? null, tagPolicy: 'PRESERVE_AND_REUSE' } : { stage: 'PERSIST_METADATA', releaseId: publishedId ?? null };
           await db.updateRelease.updateMany({ where: { id, status: 'DRAFT', updatedAt: initial.updatedAt }, data: { publicationLog: { mode: 'REAL', failed: true, ...failure } } });
           throw new ApiError(502, 'REAL_PUBLICATION_FAILED');
         }

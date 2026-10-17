@@ -1,6 +1,11 @@
 import type { ReleaseInput } from '../utils/update-schemas.js';
 import type { UpdateAsset } from './update-files.js';
 import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
+
+export class GitHubRequestError extends Error {
+  constructor(public readonly status: number, public readonly code?: string) { super('GITHUB_REQUEST_FAILED'); }
+}
 
 export interface PublishedAsset { id: string; name: string; size: number; downloadUrl: string; kind: UpdateAsset['kind'] }
 export interface PublicationResult {
@@ -39,10 +44,13 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
       const response = await this.http(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(300_000), headers: {
         Accept: 'application/vnd.github+json', Authorization: `Bearer ${this.config.token}`, 'X-GitHub-Api-Version': '2026-03-10', ...options.headers,
       } });
-      if (!response.ok) throw new Error();
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({})) as { errors?: { code?: string }[] };
+        throw new GitHubRequestError(response.status, Array.isArray(data?.errors) && data.errors.some(e => e?.code === 'already_exists') ? 'already_exists' : undefined);
+      }
       if (response.status === 204) return {};
       return await response.json() as Record<string, unknown>;
-    } catch { throw new Error('GITHUB_REQUEST_FAILED'); }
+    } catch (error) { if (error instanceof GitHubRequestError) throw error; throw new Error('GITHUB_REQUEST_FAILED'); }
   }
   private releaseId(id: string) { if (!/^[1-9][0-9]*$/.test(id)) throw new Error('INVALID_GITHUB_RELEASE_ID'); return id; }
   async verifyDownload(url: string) {
@@ -65,7 +73,8 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
     if (repo.private !== false || repo.visibility !== 'public') throw new Error('PUBLIC_UPDATES_REPOSITORY_REQUIRED');
   }
   async remove(id: string) {
-    await this.request(`https://api.github.com${this.repository}/${this.releaseId(id)}`, { method: 'DELETE' });
+    try { await this.request(`https://api.github.com${this.repository}/${this.releaseId(id)}`, { method: 'DELETE' }); }
+    catch (error) { if (!(error instanceof GitHubRequestError) || error.status !== 404) throw error; }
   }
   async verify(id: string, assets: PublishedAsset[]) {
     const release = await this.request(`https://api.github.com${this.repository}/${this.releaseId(id)}`, { method: 'GET' });
@@ -74,8 +83,43 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
       if (!release.assets.some((a: any) => String(a.id) === asset.id && a.name === asset.name && a.size === asset.size && a.state === 'uploaded' && a.browser_download_url === asset.downloadUrl)) throw new Error('GITHUB_ASSETS_INCOMPLETE');
     }
   }
-  async createDraft(input: { tag_name: string; name: string; body: string; prerelease: boolean }) {
-    const value = await this.request(`https://api.github.com${this.repository}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, draft: true }) });
+  async createDraft(input: { tag_name: string; name: string; body: string; prerelease: boolean }, recoveryOnly = false): Promise<{ id: string }> {
+    // List releases: the by-tag endpoint only returns published releases, not drafts.
+    const matches: Record<string, unknown>[] = [];
+    for (let page = 1; ; page++) {
+      const releases = await this.request(`https://api.github.com${this.repository}?per_page=100&page=${page}`, { method: 'GET' });
+      if (!Array.isArray(releases)) throw new Error('INVALID_GITHUB_RESPONSE');
+      matches.push(...releases.filter(r => r.tag_name === input.tag_name));
+      if (releases.length < 100) break;
+    }
+    if (matches.length) {
+      const existing = matches[0]!;
+      const marker = input.body.match(/<!-- central-licencas:[a-f0-9]{64} -->$/)?.[0];
+      if (matches.length !== 1 || existing.draft !== true || !marker || existing.body !== input.body || existing.name !== input.name || existing.prerelease !== input.prerelease) throw new Error('GITHUB_RELEASE_CONFLICT');
+      if (!Number.isSafeInteger(existing.id) || Number(existing.id) <= 0) throw new Error('INVALID_GITHUB_RESPONSE');
+      const id = String(existing.id);
+      // Restart owned drafts with a clean asset set, including ambiguous/failed uploads.
+      const staleAssets: Record<string, unknown>[] = [];
+      for (let page = 1; ; page++) {
+        const assets = await this.request(`https://api.github.com${this.repository}/${id}/assets?per_page=100&page=${page}`, { method: 'GET' });
+        if (!Array.isArray(assets)) throw new Error('INVALID_GITHUB_RESPONSE');
+        // Collect before deleting so pagination cannot skip entries.
+        for (const asset of assets) this.releaseId(String(asset.id));
+        staleAssets.push(...assets);
+        if (assets.length < 100) break;
+      }
+      for (const asset of staleAssets) await this.request(`https://api.github.com${this.repository}/assets/${this.releaseId(String(asset.id))}`, { method: 'DELETE' });
+      return { id };
+    }
+    // GitHub accepts an existing tag; never create, move or delete a Git ref here.
+    if (recoveryOnly) throw new Error('GITHUB_DRAFT_NOT_RECOVERED');
+    let value: Record<string, unknown>;
+    try {
+      value = await this.request(`https://api.github.com${this.repository}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, draft: true }) });
+    } catch (error) {
+      // A lost response can leave an owned draft. Reconcile once; never blindly POST again.
+      try { return await this.createDraft(input, true); } catch { throw error; }
+    }
     if (typeof value.id !== 'number' || !Number.isSafeInteger(value.id) || value.id <= 0) throw new Error('INVALID_GITHUB_RESPONSE');
     return { id: String(value.id) };
   }
@@ -92,12 +136,20 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
     } finally { stream.destroy(); }
   }
   async publish(releaseId: string) {
-    const value = await this.request(`https://api.github.com${this.repository}/${this.releaseId(releaseId)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft: false, make_latest: 'false' }) });
+    const url = `https://api.github.com${this.repository}/${this.releaseId(releaseId)}`;
+    let value: Record<string, unknown>;
+    try { value = await this.request(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft: false, make_latest: 'false' }) }); }
+    catch (error) {
+      // Only reconcile the exact release just published by this operation.
+      // An unrelated published release still conflicts in createDraft().
+      try { value = await this.request(url, { method: 'GET' }); } catch { throw error; }
+      if (String(value.id) !== releaseId || value.draft !== false) throw error;
+    }
     if (value.draft !== false) throw new Error('GITHUB_RELEASE_NOT_PUBLISHED');
   }
 }
 export class PartialPublicationError extends Error {
-  constructor(public readonly releaseId: string | undefined, public readonly stage: string) { super('GITHUB_PUBLICATION_FAILED'); }
+  constructor(public readonly releaseId: string | undefined, public readonly stage: string, public readonly reason?: string, public readonly githubStatus?: number, public readonly githubCode?: string) { super('GITHUB_PUBLICATION_FAILED'); }
 }
 export class GitHubReleasePublisher implements ReleasePublisher {
   constructor(private readonly transport: GitHubReleaseTransport) {}
@@ -106,7 +158,8 @@ export class GitHubReleasePublisher implements ReleasePublisher {
     try {
       await this.transport.assertPublic?.();
       stage = 'CREATE_DRAFT';
-      id = (await this.transport.createDraft({ tag_name: `v${input.version}`, name: `Sistema de Atendimento ${input.version}`, body: input.notes, prerelease: input.channel === 'beta' })).id;
+      const key = createHash('sha256').update(JSON.stringify([input.productId, input.version, input.channel])).digest('hex');
+      id = (await this.transport.createDraft({ tag_name: `v${input.version}`, name: `Sistema de Atendimento ${input.version}`, body: `${input.notes}\n\n<!-- central-licencas:${key} -->`, prerelease: input.channel === 'beta' })).id;
       const urls: Partial<Record<UpdateAsset['kind'], string>> = {};
       const published: PublishedAsset[] = [];
       for (const asset of [...assets].sort((a, b) => ['installer', 'metadata', 'blockmap'].indexOf(a.kind) - ['installer', 'metadata', 'blockmap'].indexOf(b.kind))) {
@@ -119,9 +172,9 @@ export class GitHubReleasePublisher implements ReleasePublisher {
       stage = 'PUBLISH'; await this.transport.publish(id);
       stage = 'VERIFY_DOWNLOAD'; await this.transport.verifyDownload?.(urls.installer!);
       return { assets: published, dryRun: false, githubReleaseId: id, installerUrl: urls.installer!, metadataUrl: urls.metadata!, steps: ['CREATE_DRAFT', 'UPLOAD_ALL', 'PUBLISH'] };
-    } catch {
+    } catch (error) {
       if (id) { try { await this.transport.remove?.(id); } catch { /* Safe release id retained for manual recovery. */ } }
-      throw new PartialPublicationError(id, stage);
+      throw new PartialPublicationError(id, stage, error instanceof Error && error.message === 'GITHUB_RELEASE_CONFLICT' ? error.message : undefined, error instanceof GitHubRequestError ? error.status : undefined, error instanceof GitHubRequestError ? error.code : undefined);
     }
   }
 }
