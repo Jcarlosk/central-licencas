@@ -6,9 +6,15 @@ import { createHash } from 'node:crypto';
 
 // Exact HTTPS origins only. GitHub's browser download URL redirects to its release asset CDN.
 const downloadOrigins = new Set(['https://github.com', 'https://release-assets.githubusercontent.com']);
+const downloadBackoffMs = [2000, 5000, 10000, 20000] as const;
+export const downloadVerificationTiming = {
+  now: () => Date.now(),
+  sleep: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
+};
+interface DownloadVerificationOptions { deadline?: number; retryNotFound?: boolean }
 
 export class GitHubRequestError extends Error {
-  constructor(public readonly status: number | undefined, public readonly code?: string, public readonly stage?: string, message = 'GITHUB_REQUEST_FAILED') { super(message); }
+  constructor(public readonly status: number | undefined, public readonly code?: string, public readonly stage?: string, message = 'GITHUB_REQUEST_FAILED', public readonly retryAfterMs?: number) { super(message); }
 }
 
 export interface PublishedAsset { id: string; name: string; sourceName?: string; size: number; downloadUrl: string; kind: UpdateAsset['kind'] }
@@ -31,7 +37,7 @@ export class DryRunPublisher implements ReleasePublisher {
 export interface GitHubReleaseTransport {
   assertPublic?(): Promise<void>;
   verify?(releaseId: string, assets: PublishedAsset[]): Promise<void>;
-  verifyDownload?(url: string): Promise<void>;
+  verifyDownload?(url: string, options?: DownloadVerificationOptions): Promise<void>;
   reconcilePublished?(id: string, input: ReleaseInput, assets: UpdateAsset[]): Promise<PublishedAsset[]>;
   remove?(releaseId: string): Promise<void>;
   createDraft(input: { tag_name: string; name: string; body: string; prerelease: boolean }): Promise<{ id: string; published?: boolean }>;
@@ -73,10 +79,34 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
       return { id: String(value.id), name: value.name, size: value.size, kind, downloadUrl: value.browser_download_url };
     } catch { throw new Error('INVALID_GITHUB_ASSET'); }
   }
-  async verifyDownload(url: string) {
+  async verifyDownload(url: string, options: DownloadVerificationOptions = {}) {
+    const deadline = Math.min(options.deadline ?? Infinity, downloadVerificationTiming.now() + 60000);
+    for (let attempt = 1; ; attempt++) {
+      try { return await this.verifyDownloadAttempt(url, deadline); }
+      catch (error) {
+        if (!(error instanceof GitHubRequestError)) throw error;
+        const transient = error.message === 'GITHUB_DOWNLOAD_HTTP_ERROR'
+          ? (options.retryNotFound === true && error.status === 404) || error.status === 429 || (error.status !== undefined && error.status >= 500 && error.status <= 599)
+          : ['GITHUB_DOWNLOAD_NETWORK_ERROR', 'GITHUB_DOWNLOAD_TIMEOUT'].includes(error.message);
+        if (!transient || attempt >= 5) throw error;
+        const waitMs = Math.max(downloadBackoffMs[attempt - 1]!, error.retryAfterMs ?? 0);
+        // Never retry earlier than Retry-After, nor extend the shared deadline.
+        if (downloadVerificationTiming.now() + waitMs >= deadline) throw error;
+        console.info('[UPDATES] download verification retry', { attempt: attempt + 1, maxAttempts: 5, origin: new URL(url).origin, previousStatus: error.status ?? null, waitMs });
+        await downloadVerificationTiming.sleep(waitMs);
+        if (downloadVerificationTiming.now() >= deadline) throw error;
+      }
+    }
+  }
+  private async verifyDownloadAttempt(url: string, deadline: number) {
     // No GitHub credentials are sent to browser/CDN URLs, including redirects.
     let status: number | undefined, redirects = 0, initialOrigin: string | null = null, finalOrigin: string | null = null;
-    let reason = 'GITHUB_DOWNLOAD_INVALID_REDIRECT', awaitingHttp = false;
+    let reason = 'GITHUB_DOWNLOAD_INVALID_REDIRECT', awaitingHttp = false, retryAfterMs: number | undefined;
+    const timeout = () => {
+      const remaining = deadline - downloadVerificationTiming.now();
+      if (remaining <= 0) { reason = 'GITHUB_DOWNLOAD_TIMEOUT'; throw new Error(); }
+      return AbortSignal.timeout(Math.max(1, Math.min(10000, remaining)));
+    };
     try {
       initialOrigin = new URL(url).origin;
       console.info('[UPDATES] download verification start', { initialOrigin });
@@ -85,18 +115,23 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
         finalOrigin = u.origin;
         if (!downloadOrigins.has(u.origin) || u.username || u.password || u.hash) { reason = 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED'; status = undefined; throw new Error(); }
         status = undefined; awaitingHttp = true;
-        let response = await this.http(u, { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(30000) });
+        let response = await this.http(u, { method: 'HEAD', redirect: 'manual', signal: timeout() });
         awaitingHttp = false;
         // Some download frontends reject HEAD. Confirm with a bounded GET, using
         // identical origin/redirect checks and cancelling the body immediately.
         if ([404, 405].includes(response.status)) {
           console.info('[UPDATES] download verification probe', { origin: u.origin, status: response.status, redirects });
           awaitingHttp = true;
-          response = await this.http(u, { method: 'GET', headers: { Range: 'bytes=0-0' }, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+          response = await this.http(u, { method: 'GET', headers: { Range: 'bytes=0-0' }, redirect: 'manual', signal: timeout() });
           awaitingHttp = false;
           await response.body?.cancel();
         }
         status = response.status;
+        if (status === 429) {
+          const value = response.headers.get('retry-after');
+          if (value && /^\d+$/.test(value)) retryAfterMs = Number(value) * 1000;
+          else if (value && Number.isFinite(Date.parse(value))) retryAfterMs = Math.max(0, Date.parse(value) - downloadVerificationTiming.now());
+        }
         if ([200, 206].includes(status)) {
           console.info('[UPDATES] download verification complete', { initialOrigin, finalOrigin, status, redirects }); return;
         }
@@ -114,11 +149,11 @@ export class GitHubHttpTransport implements GitHubReleaseTransport {
       }
     } catch (error) {
       if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) reason = 'GITHUB_DOWNLOAD_TIMEOUT';
-      else if (awaitingHttp) { reason = 'GITHUB_DOWNLOAD_NETWORK_ERROR'; status = undefined; }
+      else if (awaitingHttp && reason !== 'GITHUB_DOWNLOAD_TIMEOUT') { reason = 'GITHUB_DOWNLOAD_NETWORK_ERROR'; status = undefined; }
       // Never log URL paths, query strings, Location headers or exception messages.
       console.info('[UPDATES] download verification failed', { initialOrigin, finalOrigin, status: status ?? null, redirects, reason });
     }
-    throw new GitHubRequestError(status, 'download_unverified', 'DOWNLOAD_VERIFY', reason);
+    throw new GitHubRequestError(status, 'download_unverified', 'DOWNLOAD_VERIFY', reason, retryAfterMs);
   }
   async reconcilePublished(id: string, input: ReleaseInput, assets: UpdateAsset[]): Promise<PublishedAsset[]> {
     const value = await this.request(`https://api.github.com${this.repository}/${this.releaseId(id)}`, { method: 'GET' }, 'VERIFY_PUBLISHED_RELEASE');
@@ -247,7 +282,8 @@ export class GitHubReleasePublisher implements ReleasePublisher {
       if (!this.transport.reconcilePublished) throw new Error('GITHUB_RELEASE_CONFLICT');
       const recovered = await this.transport.reconcilePublished(id!, input, assets);
       stage = 'DOWNLOAD_VERIFY';
-      for (const asset of recovered) await this.transport.verifyDownload?.(asset.downloadUrl);
+      const deadline = downloadVerificationTiming.now() + 60000;
+      for (const asset of recovered) await this.transport.verifyDownload?.(asset.downloadUrl, { deadline, retryNotFound: true });
       return { dryRun: false, assets: recovered, githubReleaseId: id!, installerUrl: recovered.find(a => a.kind === 'installer')!.downloadUrl, metadataUrl: recovered.find(a => a.kind === 'metadata')!.downloadUrl, steps: ['RECONCILE_EXISTING_RELEASE', 'VERIFY_ASSETS', 'DOWNLOAD_VERIFY'] };
     };
     try {
@@ -272,8 +308,9 @@ export class GitHubReleasePublisher implements ReleasePublisher {
       stage = 'VERIFY_ASSETS'; await this.transport.verify?.(id, published);
       stage = 'PUBLISH_RELEASE'; await this.transport.publish(id);
       stage = 'DOWNLOAD_VERIFY';
-      for (const asset of published) await this.transport.verifyDownload?.(asset.downloadUrl);
-      return { assets: published, dryRun: false, githubReleaseId: id, installerUrl: urls.installer!, metadataUrl: urls.metadata!, steps: ['CREATE_DRAFT', 'UPLOAD_ALL', 'PUBLISH'] };
+      const deadline = downloadVerificationTiming.now() + 60000;
+      for (const asset of published) await this.transport.verifyDownload?.(asset.downloadUrl, { deadline, retryNotFound: true });
+      return { assets: published, dryRun: false, githubReleaseId: id, installerUrl: urls.installer!, metadataUrl: urls.metadata!, steps: ['CREATE_DRAFT', 'UPLOAD_ALL', 'PUBLISH', 'DOWNLOAD_VERIFY'] };
     } catch (error) {
       if (id && !reconciling && stage !== 'DOWNLOAD_VERIFY') { try { await this.transport.remove?.(id); } catch { /* Safe release id retained for recovery. */ } }
       const safeReasons = ['MULTIPLE_RELEASE_CANDIDATES', 'RELEASE_TAG_CONFLICT', 'RELEASE_ID_MISMATCH', 'RELEASE_NOT_PUBLISHED', 'RELEASE_METADATA_MISMATCH', 'RELEASE_ASSET_MISMATCH', 'RELEASE_SIZE_MISMATCH', 'RELEASE_HASH_MISMATCH', 'LATEST_YML_MISMATCH', 'UNMANAGED_PUBLISHED_RELEASE', 'GITHUB_RELEASE_CONFLICT', 'GITHUB_METADATA_RECONCILIATION_REQUIRED', 'GITHUB_ASSETS_INCOMPLETE', 'INVALID_GITHUB_RESPONSE', 'INVALID_GITHUB_ASSET', 'INVALID_GITHUB_DOWNLOAD_URL', 'GITHUB_RELEASE_NOT_PUBLISHED', 'GITHUB_DOWNLOAD_ORIGIN_UNVERIFIED', 'GITHUB_DOWNLOAD_HTTP_ERROR', 'GITHUB_DOWNLOAD_NETWORK_ERROR', 'GITHUB_DOWNLOAD_TIMEOUT', 'GITHUB_DOWNLOAD_INVALID_REDIRECT', 'GITHUB_DOWNLOAD_REDIRECT_LIMIT', 'PUBLIC_UPDATES_REPOSITORY_REQUIRED'];
