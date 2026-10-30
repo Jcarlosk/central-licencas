@@ -1,120 +1,437 @@
+
+<div align="center">
+
+<img src="docs/images/logo.png" alt="Central de Licenças" width="100" />
+
 # Central de Licenças
 
-API independente para administrar clientes, produtos, instalações e licenças, com painel web administrativo em `/admin/` servido pela própria aplicação. Não integra nem altera o `sistema-senhas`. Express, TypeScript, PostgreSQL, Prisma, Zod, bcrypt, JWT e assinatura assimétrica Ed25519. Não há pagamentos, seed automático ou administrador padrão.
+**Plataforma independente para gerenciamento e validação de licenças de software.**
 
-Para usar o painel, execute `npm run dev` ou `npm run build` seguido de `npm start`, abra `/admin/` na URL da aplicação e entre com um administrador existente. Consulte [o relatório do painel](ADMIN-PANEL-REPORT.md) para funcionalidades, segurança, endpoints e resultados de validação. `npm run test:unit` executa os testes que não dependem de PostgreSQL; a suíte completa continua usando o banco isolado em Docker. Para excluir o teste que chama revoke, use `npm test -- --testNamePattern '^(?!.*REVOKED is permanent)'`.
+Gerencie clientes, produtos, instalações e licenças em um painel administrativo centralizado, com autenticação segura, auditoria de operações e assinaturas digitais Ed25519.
 
-## Requisitos e instalação
+![Node.js](https://img.shields.io/badge/Node.js-22-339933?style=flat-square&logo=nodedotjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)
+![Express](https://img.shields.io/badge/Express-000000?style=flat-square&logo=express&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white)
+![Prisma](https://img.shields.io/badge/Prisma-6.12.0-2D3748?style=flat-square&logo=prisma&logoColor=white)
+![Security](https://img.shields.io/badge/Signature-Ed25519-2563EB?style=flat-square)
 
-Validado com Node **22.22.3** e npm **10.9.8**. Use Node 22.22.3+ e PostgreSQL 17. Docker Desktop com contêineres Linux é necessário somente para `npm test`; a API aceita PostgreSQL local ou remoto.
+<br />
+
+<img src="docs/images/dashboard.png" alt="Dashboard da Central de Licenças" width="100%" />
+
+<br />
+
+**[Visão geral](#visão-geral) · [Interface](#interface-administrativa) · [Instalação](#instalação) · [API](#referência-da-api) · [Segurança](#segurança) · [Deploy](#deploy-no-railway)**
+
+</div>
+
+---
+
+## Visão geral
+
+A **Central de Licenças** é uma API independente desenvolvida para administrar o ciclo de vida de licenças de software.
+
+A aplicação oferece uma interface administrativa integrada, acessível em `/admin/`, além de uma API REST para gerenciamento e validação.
+
+### Funcionalidades
+
+| Módulo | Funcionalidades |
+| --- | --- |
+| Clientes | Cadastro, consulta e atualização de clientes |
+| Produtos | Administração dos produtos licenciados |
+| Instalações | Identificação e controle de instalações |
+| Licenças | Emissão, renovação, suspensão, reativação e revogação |
+| Validação | Consulta autenticada do estado de licenciamento |
+| Auditoria | Histórico de eventos e alterações |
+| Administração | Painel web com autenticação JWT |
+| Segurança | bcrypt, rate limiting e assinatura Ed25519 |
+
+> [!IMPORTANT]
+> A Central de Licenças funciona de maneira independente. Não integra nem modifica o `sistema-senhas`. A integração com aplicações Electron será realizada separadamente.
+
+O projeto não possui processamento de pagamentos, administrador padrão ou seed automático.
+
+---
+
+## Interface administrativa
+
+O painel web é servido diretamente pela aplicação Express e está disponível em:
+
+```text
+http://localhost:3000/admin/
+```
+
+A autenticação exige um administrador previamente criado.
+
+### Dashboard
+
+Visão centralizada da administração e das informações do sistema.
+
+<div align="center">
+  <img src="docs/images/dashboard.png" width="100%" alt="Dashboard administrativo" />
+</div>
+
+### Gestão de clientes
+
+Cadastro e gerenciamento dos clientes associados aos produtos e instalações.
+
+<div align="center">
+  <img src="docs/images/clientes.png" width="100%" alt="Gestão de clientes" />
+</div>
+
+### Produtos e instalações
+
+Organização dos produtos cadastrados e das instalações vinculadas aos clientes.
+
+<div align="center">
+  <img src="docs/images/produtos.png" width="49%" alt="Produtos" />
+  <img src="docs/images/instalacoes.png" width="49%" alt="Instalações" />
+</div>
+
+### Gerenciamento de licenças
+
+Operações administrativas sobre o ciclo de vida das licenças.
+
+<div align="center">
+  <img src="docs/images/licencas.png" width="100%" alt="Gerenciamento de licenças" />
+</div>
+
+### Auditoria
+
+Consulta ao histórico de eventos, validações e alterações administrativas.
+
+<div align="center">
+  <img src="docs/images/auditoria.png" width="100%" alt="Auditoria" />
+</div>
+
+### Autenticação
+
+Acesso restrito aos administradores cadastrados.
+
+<div align="center">
+  <img src="docs/images/login.png" width="100%" alt="Tela de autenticação" />
+</div>
+
+Para detalhes sobre funcionalidades, segurança e resultados de validação do painel, consulte [ADMIN-PANEL-REPORT.md](ADMIN-PANEL-REPORT.md).
+
+---
+
+## Arquitetura
+
+A solução utiliza uma API REST construída com Express e TypeScript, persistência PostgreSQL e Prisma ORM.
+
+```mermaid
+flowchart TB
+    A["Painel administrativo /admin/"]
+    B["API REST Express + TypeScript"]
+    C["Autenticação JWT"]
+    D["Serviços e regras de negócio"]
+    E["Prisma ORM"]
+    F[("PostgreSQL 17")]
+    G["Validação de licença"]
+    H["Assinatura Ed25519"]
+    I["Consumidor externo futuro"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    B --> G
+    G --> H
+    I --> G
+```
+
+### Tecnologias
+
+| Camada | Tecnologia |
+| --- | --- |
+| Runtime | Node.js 22 |
+| Linguagem | TypeScript |
+| Servidor HTTP | Express |
+| Banco de dados | PostgreSQL 17 |
+| ORM | Prisma 6.12.0 |
+| Validação | Zod |
+| Senhas administrativas | bcrypt |
+| Autenticação | JWT |
+| Assinatura digital | Ed25519 |
+| Testes | Vitest e Supertest |
+| Ambiente de testes | Docker |
+| Hospedagem planejada | Railway |
+
+---
+
+## Requisitos
+
+Ambiente validado com:
+
+- Node.js `22.22.3`
+- npm `10.9.8`
+- PostgreSQL `17`
+- Docker Desktop com contêineres Linux, necessário para a suíte completa de testes
+
+A API aceita PostgreSQL local ou remoto.
+
+## Instalação
+
+### 1. Acessar o projeto
 
 No PowerShell:
 
 ```powershell
 cd 'D:\app senha\central-licencas'
+```
+
+Confirme as versões:
+
+```powershell
 node --version
 npm --version
+```
+
+### 2. Instalar dependências
+
+```powershell
 npm ci
+```
+
+### 3. Configurar ambiente
+
+```powershell
 Copy-Item .env.example .env
 ```
 
-Edite `.env` antes de iniciar. Nunca versione esse arquivo.
+Edite o arquivo `.env` com as configurações do ambiente.
 
-| Variável | Configuração |
+> [!CAUTION]
+> Nunca publique o `.env`, senhas, tokens, chaves privadas ou credenciais do banco no GitHub.
+
+### Variáveis de ambiente
+
+| Variável | Descrição |
 | --- | --- |
 | `PORT` | Porta HTTP, padrão `3000` |
 | `NODE_ENV` | `development`, `production` ou `test` |
-| `DATABASE_URL` | `postgresql://USUARIO:SENHA@HOST:5432/central_licencas?schema=public` — substitua os marcadores e codifique caracteres especiais da senha na URL |
-| `JWT_SECRET` | Segredo aleatório com pelo menos 32 caracteres; gere 48 bytes aleatórios |
-| `JWT_EXPIRES_IN` | Ex.: `8h`; inteiro seguido de `s`, `m`, `h` ou `d` |
-| `LICENSE_PRIVATE_KEY_PATH` | `keys/license-private.pem` ou caminho absoluto; obrigatório somente sem o par Base64 |
-| `LICENSE_PUBLIC_KEY_PATH` | `keys/license-public.pem` ou caminho absoluto; obrigatório somente sem o par Base64 |
-| `LICENSE_PRIVATE_KEY_BASE64` | Base64 padrão dos bytes do PEM privado; opcional, configurar junto com o público |
-| `LICENSE_PUBLIC_KEY_BASE64` | Base64 padrão dos bytes do PEM público; opcional, configurar junto com o privado |
-| `RATE_LIMIT_MAX` | Requisições de API por IP/minuto, padrão `300` |
+| `DATABASE_URL` | URL de conexão PostgreSQL |
+| `JWT_SECRET` | Segredo aleatório de pelo menos 32 caracteres |
+| `JWT_EXPIRES_IN` | Duração do token, como `8h` |
+| `LICENSE_PRIVATE_KEY_PATH` | Caminho da chave privada |
+| `LICENSE_PUBLIC_KEY_PATH` | Caminho da chave pública |
+| `LICENSE_PRIVATE_KEY_BASE64` | Chave privada PEM codificada em Base64 |
+| `LICENSE_PUBLIC_KEY_BASE64` | Chave pública PEM codificada em Base64 |
+| `RATE_LIMIT_MAX` | Requisições por IP/minuto, padrão `300` |
 | `VALIDATION_RATE_LIMIT_MAX` | Validações por IP/minuto, padrão `60` |
 | `LOGIN_RATE_LIMIT_MAX` | Tentativas de login por IP/minuto, padrão `10` |
 
-Exemplo para gerar um JWT_SECRET novo e gravá-lo diretamente no `.env`, sem exibi-lo no terminal (requer que `.env` exista):
+Exemplo de URL de conexão:
+
+```dotenv
+DATABASE_URL=postgresql://USUARIO:SENHA@HOST:5432/central_licencas?schema=public
+```
+
+Substitua os marcadores por valores reais e codifique caracteres especiais da senha na URL.
+
+### Gerar segredo JWT
+
+Com o `.env` já criado:
 
 ```powershell
 node --input-type=module -e 'import {randomBytes} from "node:crypto"; import {readFileSync,writeFileSync} from "node:fs"; const p=".env"; writeFileSync(p,readFileSync(p,"utf8").replace(/^JWT_SECRET=.*$/m,"JWT_SECRET="+randomBytes(48).toString("base64url")));'
 ```
 
-Se seu PowerShell antigo não preservar aspas de comandos nativos, gere o segredo em um gerenciador de senhas e cole no `.env`.
+O comando gera 48 bytes aleatórios e atualiza o valor existente de `JWT_SECRET` sem imprimir o segredo.
 
-## PostgreSQL e migrations
+Caso o PowerShell não preserve corretamente as aspas, gere o segredo em um gerenciador de senhas e configure-o manualmente.
 
-Crie um banco **novo** `central_licencas` e um usuário exclusivo com senha forte usando pgAdmin ou a administração do seu PostgreSQL. Configure a URL no `.env`. Não use o banco do sistema de senhas. Não há senha ou connection string pronta no projeto.
+---
+
+## Banco de dados
+
+Crie um banco exclusivo chamado `central_licencas` e um usuário com senha forte.
+
+Não compartilhe o banco com o sistema de senhas.
+
+### Gerar Prisma Client
 
 ```powershell
 npm run prisma:generate
+```
+
+### Aplicar migrations
+
+```powershell
 npm run db:migrate
 ```
 
-`db:migrate` aplica a migration versionada sem resetar o banco. Para evoluir o schema no desenvolvimento: `npm run db:migrate:dev -- --name nome_da_mudanca`; revise e versione o SQL gerado. Não use `migrate dev` em produção. A migration usa UUID, timestamps com timezone, índices, relações com `RESTRICT` e unicidade de licença por instalação.
+O comando aplica as migrations versionadas sem resetar o banco.
 
-O Prisma CLI e Client estão fixados em 6.12.0: a versão 6.19.3 inicialmente avaliada carregava uma dependência de desenvolvimento com alerta de segurança. `package-lock.json` fixa toda a árvore; `npm audit` faz parte da verificação de entrega. Documentação utilizada: [transações do Prisma 6](https://www.prisma.io/docs/orm/v6/prisma-client/queries/transactions) e [tratamento assíncrono de erros no Express 5](https://expressjs.com/en/5x/guide/error-handling/).
+Para desenvolver alterações no schema:
 
-## Chaves e primeiro administrador
+```powershell
+npm run db:migrate:dev -- --name nome_da_mudanca
+```
+
+Revise o SQL gerado e versione as migrations.
+
+> [!WARNING]
+> Não execute `migrate dev` em produção. Utilize `npm run db:migrate`.
+
+A estrutura utiliza UUID, timestamps com timezone, índices, relacionamentos com `RESTRICT` e unicidade de licença por instalação.
+
+O Prisma CLI e Client estão fixados na versão `6.12.0`, com dependências controladas pelo `package-lock.json`.
+
+---
+
+## Chaves de assinatura
+
+A Central utiliza assinaturas digitais assimétricas Ed25519.
+
+### Gerar chaves
 
 ```powershell
 npm run generate-keys
-npm run create-admin
 ```
 
-`generate-keys` gera um par Ed25519 real em `keys/license-private.pem` (PKCS#8) e `keys/license-public.pem` (SPKI). Recusa sobrescrever arquivos existentes. Nenhuma chave é fornecida pelo código. `.gitignore` bloqueia todos os PEMs e o conteúdo de `keys/`, exceto `.gitkeep`. O servidor confere tipo e correspondência das chaves ao iniciar.
+Arquivos gerados:
 
-Restrinja a chave privada, `.env` e backups à conta do serviço. Em Linux, a chave privada é criada com modo `0600`; em Windows, configure a ACL NTFS para sua conta/conta de serviço, pois modos POSIX não substituem ACLs. Guarde backup seguro; não regenere uma chave em uso sem planejar a distribuição da nova chave pública. O futuro Electron receberá **somente a chave pública**.
+```text
+keys/
+├── license-private.pem
+└── license-public.pem
+```
 
-### Chaves por ambiente e Railway
+- Chave privada: utilizada exclusivamente pela Central para assinar respostas.
+- Chave pública: utilizada pelos consumidores para verificar assinaturas.
 
-Quando **ambas** `LICENSE_PRIVATE_KEY_BASE64` e `LICENSE_PUBLIC_KEY_BASE64` estiverem preenchidas, o servidor decodifica os PEMs em memória e usa esse par, com prioridade sobre os caminhos. Não cria arquivos temporários. Valida Base64 padrão canônico (sem espaços/quebras de linha, com padding quando necessário), PEM, algoritmo Ed25519 e correspondência das chaves. Valores maiores que 16 KiB por variável são rejeitados. Falhas retornam apenas erro genérico, sem conteúdo das chaves.
+As chaves utilizam os formatos PKCS#8 e SPKI.
 
-Se ambas estiverem ausentes ou vazias, o comportamento local permanece: carregar `LICENSE_PRIVATE_KEY_PATH` e `LICENSE_PUBLIC_KEY_PATH`. Se apenas uma Base64 estiver preenchida, ou o par for inválido, a inicialização falha; **não há fallback silencioso para arquivos**. Em produção é possível omitir completamente as duas variáveis `_PATH`. Base64 é uma codificação, não criptografia: proteja a variável privada como um segredo.
+O comando não sobrescreve arquivos existentes.
 
-Converta os PEMs existentes no PowerShell, sem imprimir chaves ou Base64:
+> [!CAUTION]
+> Nunca distribua a chave privada para aplicações cliente. O futuro aplicativo Electron deve receber somente a chave pública.
+
+Mantenha backups protegidos. Trocar um par de chaves em uso exige planejamento para atualizar a chave pública dos consumidores.
+
+Em Linux, a chave privada é criada com permissão `0600`. No Windows, configure as permissões NTFS adequadas.
+
+### Chaves por variáveis de ambiente
+
+Em hospedagens como Railway, é possível configurar:
+
+```dotenv
+LICENSE_PRIVATE_KEY_BASE64=
+LICENSE_PUBLIC_KEY_BASE64=
+```
+
+Quando ambas estão preenchidas, a aplicação utiliza o par em memória, com prioridade sobre os caminhos dos arquivos.
+
+A inicialização falha se apenas uma estiver configurada ou se o par for inválido.
+
+Não há fallback silencioso para arquivos quando as variáveis Base64 estão parcialmente preenchidas.
+
+O Base64 deve ser padrão e canônico. Cada variável possui limite de 16 KiB.
+
+**Base64 não é criptografia.** Proteja a chave privada como um segredo.
+
+### Converter PEM para Base64
+
+No PowerShell:
 
 ```powershell
-$privateKeyBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path 'keys/license-private.pem').Path))
-$publicKeyBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path 'keys/license-public.pem').Path))
-# Cole o conteúdo de cada variável na variável correspondente do Railway.
-# Set-Clipboard não imprime o valor; execute uma linha e cole antes da próxima.
+$privateKeyBase64 = [Convert]::ToBase64String(
+  [IO.File]::ReadAllBytes(
+    (Resolve-Path 'keys/license-private.pem').Path
+  )
+)
+
+$publicKeyBase64 = [Convert]::ToBase64String(
+  [IO.File]::ReadAllBytes(
+    (Resolve-Path 'keys/license-public.pem').Path
+  )
+)
+```
+
+Copie uma variável por vez:
+
+```powershell
 Set-Clipboard -Value $privateKeyBase64
-# Cole em LICENSE_PRIVATE_KEY_BASE64; depois:
+```
+
+Configure `LICENSE_PRIVATE_KEY_BASE64` no Railway.
+
+Depois:
+
+```powershell
 Set-Clipboard -Value $publicKeyBase64
-# Cole em LICENSE_PUBLIC_KEY_BASE64; depois limpe a sessão e a área de transferência:
+```
+
+Configure `LICENSE_PUBLIC_KEY_BASE64`.
+
+Limpe a sessão:
+
+```powershell
 Set-Clipboard -Value ''
 Remove-Variable privateKeyBase64,publicKeyBase64
 ```
 
-Não ative histórico/sincronização da área de transferência ao copiar segredos. Não use `Write-Output`, `echo`, logs ou arquivos versionados para esses valores. A conversão não gera novas chaves, preservando a chave pública distribuída.
+Evite histórico e sincronização da área de transferência ao manipular segredos.
 
-Nas Variables do **serviço da API** no Railway, configure:
+---
 
-* `NODE_ENV=production`;
-* `DATABASE_URL`: referência à URL do serviço PostgreSQL exclusivo da central;
-* `JWT_SECRET`: segredo aleatório existente/gerado com pelo menos 32 caracteres;
-* `JWT_EXPIRES_IN=8h` (ou a duração que já utiliza);
-* `LICENSE_PRIVATE_KEY_BASE64` e `LICENSE_PUBLIC_KEY_BASE64`: conteúdo das variáveis PowerShell correspondentes;
-* `PORT`: pode usar o valor fornecido pelo Railway; o servidor já o lê;
-* opcionais: `RATE_LIMIT_MAX`, `VALIDATION_RATE_LIMIT_MAX`, `LOGIN_RATE_LIMIT_MAX` (padrões preservados).
+## Primeiro administrador
 
-Não é necessário enviar PEMs, criar volume de chaves ou definir `_PATH`. Marque a chave privada e o JWT_SECRET como sealed quando apropriado. Veja a [documentação de variáveis do Railway](https://docs.railway.com/variables) e de [Node.js e PORT](https://railway.com/deploy/nodejs-1).
+Execute:
 
-Para a futura configuração do serviço (nenhum deploy é executado por este projeto): use a pasta `central-licencas` como raiz, Node 22.22.3+, Build Command `npm ci --include=dev && npm run prisma:generate && npm run build`, Pre-Deploy Command `npm run db:migrate`, Start Command `npm start` e health check `/health`. O build precisa das dependências de desenvolvimento para TypeScript e Prisma CLI. O comando de migration continua o mesmo e não reseta o banco. Consulte [Start Command](https://docs.railway.com/deployments/start-command). Não execute `generate-keys` ou seed automaticamente em produção.
+```powershell
+npm run create-admin
+```
 
-`create-admin` pergunta nome, email e senha com entrada oculta. Exige ao menos 12 caracteres e no máximo 72 bytes UTF-8 (limite do bcrypt), aplica bcrypt custo 12 e não imprime senha/hash. Email é normalizado para minúsculas. Para automação também aceita JSON `{ "name", "email", "password" }` pelo stdin, fornecido por um gerenciador de segredos; evite argumentos de linha de comando e arquivos de senha. Não há credenciais padrão.
+O assistente solicita:
 
-## Iniciar
+- Nome
+- Email
+- Senha
 
-Desenvolvimento:
+A senha exige pelo menos 12 caracteres e no máximo 72 bytes UTF-8.
+
+O armazenamento utiliza bcrypt com custo 12. A senha e seu hash não são exibidos no terminal.
+
+O email é normalizado para minúsculas.
+
+Também existe suporte a JSON via stdin para automações seguras:
+
+```json
+{
+  "name": "Administrador",
+  "email": "admin@exemplo.com",
+  "password": "SENHA_FORNECIDA_COM_SEGURANCA"
+}
+```
+
+Não passe senhas por argumentos de linha de comando nem salve credenciais em arquivos versionados.
+
+**Não existem credenciais administrativas padrão.**
+
+---
+
+## Executando a aplicação
+
+### Desenvolvimento
 
 ```powershell
 npm run dev
 ```
 
-Produção, com `NODE_ENV=production` no `.env`:
+Abra:
+
+```text
+http://localhost:3000/admin/
+```
+
+### Produção
+
+Configure `NODE_ENV=production` e execute:
 
 ```powershell
 npm ci
@@ -124,157 +441,797 @@ npm run build
 npm start
 ```
 
-Execute sempre da pasta raiz da central, para resolver os caminhos relativos. O entrypoint compilado é `dist/src/server.js`. A inicialização exige banco acessível, ENV válido e chaves válidas. SIGINT/SIGTERM encerram conexões de modo controlado.
+O entrypoint compilado é:
 
-Na publicação online, use HTTPS no proxy/serviço de hospedagem. A API não confia em `X-Forwarded-For`: `trust proxy=false`. Atrás de proxy, os limites serão compartilhados pelo IP do proxy até você configurar explicitamente proxies confiáveis e filtros no proxy. O limiter em memória é adequado a uma instância; múltiplas réplicas exigem um armazenamento compartilhado para limites globais. O IP não determina direito de uso. Nenhum request, token, senha, hash ou segredo é logado pela aplicação.
-
-## Verificações e testes
-
-```powershell
-npm run typecheck
-npm run build
-npm test
-npm audit
+```text
+dist/src/server.js
 ```
 
-`npm test` cria seu próprio contêiner PostgreSQL 17 em porta aleatória de loopback, com nome e senha aleatórios; aplica a migration real e executa Vitest/Supertest contra esse banco. Usa chaves Ed25519 temporárias reais. **Não lê seu DATABASE_URL como destino de teste, não reseta bancos existentes e não usa mocks.** Remove apenas o contêiner e diretório temporário criados pela execução. Inicie Docker Desktop antes; no primeiro teste será necessário baixar `postgres:17-alpine`. Se Docker/banco/migration falhar, o comando falha explicitamente. Se o processo for encerrado à força, pode restar um contêiner `central-licencas-test-*`; remova somente o contêiner dessa execução.
+A aplicação verifica as configurações, as chaves e o acesso ao banco durante a inicialização.
 
-Cobertura: login válido/inválido, JWT obrigatório/expirado/algoritmo/audience/admin inativo, CRUD, validação Zod, relações, hash do segredo, geração de ID, criação e unicidade da licença, cinco estados, entidades inativas, datas-limite, renovação válida/vencida/concorrente, suspensão, reativação, revogação definitiva, credenciais inválidas, Ed25519 e adulteração de cada campo, deduplicação concorrente de auditoria, paginação/filtros, limites de login/validação, JSON inválido/grande, health e headers de segurança.
+O encerramento por SIGINT ou SIGTERM fecha as conexões de forma controlada.
 
-## Endpoints
+---
 
-Prefixo `/api/v1`. Todas as rotas administrativas exigem `Authorization: Bearer <JWT>`. JSON é estrito: campos desconhecidos são rejeitados. UUID inválido retorna 400; registro ausente, 404; conflito, 409; autenticação inválida, 401; rate limit, 429. Erros retornam `{ "success": false, "error": "CODIGO" }`, sem stack trace nem dados internos.
+## Referência da API
 
-| Método | Rota | Uso |
+Prefixo:
+
+```text
+/api/v1
+```
+
+Rotas administrativas exigem:
+
+```http
+Authorization: Bearer <JWT>
+```
+
+### Autenticação e saúde
+
+| Método | Endpoint | Acesso |
 | --- | --- | --- |
-| GET | `/health` | Público, sem dados do banco |
-| POST | `/auth/login` | Público, email e senha; retorna `token` |
-| GET, POST | `/clients` | Lista/cria clientes |
-| GET, PATCH | `/clients/:id` | Consulta/atualiza cliente |
-| GET, POST | `/products` | Lista/cria produtos |
-| GET, PATCH | `/products/:id` | Consulta/atualiza produto |
-| GET, POST | `/installations` | Lista/cria instalações |
-| GET, PATCH | `/installations/:id` | Consulta/atualiza nome/active |
-| GET, POST | `/licenses` | Lista/cria licenças |
-| GET | `/licenses/:id` | Consulta licença |
-| POST | `/licenses/:id/renew` | `{ "days": 30, "graceDays": 5 }` |
-| POST | `/licenses/:id/suspend` | `{ "reason": "..." }` opcional |
-| POST | `/licenses/:id/reactivate` | `{ "reason": "..." }` opcional |
-| POST | `/licenses/:id/revoke` | `{ "reason": "..." }` opcional |
-| GET | `/events` | Auditoria paginada e filtrada |
-| POST | `/license/validate` | Público, credenciais da instalação; **sem JWT admin** |
+| GET | `/health` | Público |
+| POST | `/auth/login` | Público |
 
-Listagens: `?page=1&limit=20` (limite até 100). Eventos permitem `installationId` (UUID interno), `licenseId`, `type`, `from`, `to` (ISO UTC/offset). Resposta `{ success, data, pagination: { total, page, limit } }`. Não há DELETE.
+O endpoint `/health` fica fora do prefixo `/api/v1`.
 
-## Criar BANABUIU-001 e validar (PowerShell)
+### Clientes
 
-Com a API iniciada e um admin criado, execute o roteiro abaixo. A senha é solicitada de forma oculta; não há senha padrão. Não ative transcript/logging de terminal ao manipular credenciais. Guarde o segredo retornado pela criação em seu gerenciador de segredos: ele não poderá ser consultado novamente. O roteiro mantém o segredo somente na memória da sessão para validar.
+| Método | Endpoint | Descrição |
+| --- | --- | --- |
+| GET | `/clients` | Listar clientes |
+| POST | `/clients` | Criar cliente |
+| GET | `/clients/:id` | Consultar cliente |
+| PATCH | `/clients/:id` | Atualizar cliente |
+
+### Produtos
+
+| Método | Endpoint | Descrição |
+| --- | --- | --- |
+| GET | `/products` | Listar produtos |
+| POST | `/products` | Criar produto |
+| GET | `/products/:id` | Consultar produto |
+| PATCH | `/products/:id` | Atualizar produto |
+
+### Instalações
+
+| Método | Endpoint | Descrição |
+| --- | --- | --- |
+| GET | `/installations` | Listar instalações |
+| POST | `/installations` | Criar instalação |
+| GET | `/installations/:id` | Consultar instalação |
+| PATCH | `/installations/:id` | Atualizar nome ou status ativo |
+
+### Licenças
+
+| Método | Endpoint | Descrição |
+| --- | --- | --- |
+| GET | `/licenses` | Listar licenças |
+| POST | `/licenses` | Criar licença |
+| GET | `/licenses/:id` | Consultar licença |
+| POST | `/licenses/:id/renew` | Renovar licença |
+| POST | `/licenses/:id/suspend` | Suspender licença |
+| POST | `/licenses/:id/reactivate` | Reativar licença |
+| POST | `/licenses/:id/revoke` | Revogar definitivamente |
+
+### Validação e auditoria
+
+| Método | Endpoint | Descrição |
+| --- | --- | --- |
+| POST | `/license/validate` | Validação pública autenticada por instalação |
+| GET | `/events` | Histórico de auditoria |
+
+A validação não exige JWT administrativo. Utiliza as credenciais próprias da instalação.
+
+### Paginação
+
+Listagens aceitam:
+
+```http
+GET /api/v1/clients?page=1&limit=20
+```
+
+O limite máximo é 100 registros por página.
+
+Exemplo de estrutura:
+
+```json
+{
+  "success": true,
+  "data": [],
+  "pagination": {
+    "total": 0,
+    "page": 1,
+    "limit": 20
+  }
+}
+```
+
+Os eventos podem ser filtrados por:
+
+- `installationId`
+- `licenseId`
+- `type`
+- `from`
+- `to`
+
+As datas utilizam ISO com UTC ou offset.
+
+### Tratamento de erros
+
+| HTTP | Significado |
+| --- | --- |
+| 400 | Requisição inválida |
+| 401 | Autenticação inválida |
+| 404 | Registro não encontrado |
+| 409 | Conflito |
+| 429 | Limite de requisições excedido |
+
+Exemplo:
+
+```json
+{
+  "success": false,
+  "error": "INVALID_INSTALLATION_CREDENTIALS"
+}
+```
+
+Campos JSON desconhecidos são rejeitados. A API não expõe stack traces ou dados internos nas respostas de erro.
+
+Não existem endpoints DELETE.
+
+---
+
+## Ciclo de vida das licenças
+
+Cada instalação possui uma única licença, preservada ao longo das renovações.
+
+### Estados
+
+| Estado | Significado |
+| --- | --- |
+| `ACTIVE` | Licença válida e entidades habilitadas |
+| `GRACE` | Período de carência após vencimento |
+| `EXPIRED` | Prazo de licença e carência encerrados |
+| `SUSPENDED` | Suspensão administrativa ou entidade inativa |
+| `REVOKED` | Revogação administrativa definitiva |
+
+```mermaid
+flowchart TD
+    A["Licença criada"] --> B["ACTIVE"]
+    B --> C["GRACE"]
+    C --> D["EXPIRED"]
+    B --> E["SUSPENDED"]
+    C --> E
+    D --> E
+    E --> B
+    E --> C
+    E --> D
+    B --> F["REVOKED"]
+    C --> F
+    D --> F
+    E --> F
+    F --> G["Estado terminal"]
+```
+
+O diagrama representa possibilidades gerais. Reativar uma licença suspensa não garante o retorno a `ACTIVE`: o estado resultante depende das datas e da situação das entidades vinculadas.
+
+### Regras administrativas
+
+Somente três estados são administrativos:
+
+```text
+ACTIVE
+SUSPENDED
+REVOKED
+```
+
+`GRACE` e `EXPIRED` são calculados conforme as datas.
+
+Prioridade de estados:
+
+1. Revogação definitiva.
+2. Suspensão administrativa ou entidades inativas.
+3. Datas de validade e carência.
+
+### Criação
+
+```text
+startsAt = agora
+expiresAt = agora + days
+graceUntil = expiresAt + graceDays
+```
+
+Limites:
+
+| Campo | Intervalo |
+| --- | --- |
+| `days` | 1 a 3650 |
+| `graceDays` | 0 a 365 |
+| Carência padrão | 5 dias |
+
+Cada dia representa exatamente 24 horas.
+
+O servidor utiliza seu próprio relógio em UTC.
+
+### Renovação
+
+A renovação utiliza:
+
+```text
+base = max(expiresAt, agora)
+expiresAt = base + days
+graceUntil = expiresAt + graceDays
+```
+
+Uma licença vencida é renovada a partir do momento atual.
+
+A renovação não remove uma suspensão administrativa.
+
+### Revogação
+
+`REVOKED` é definitivo.
+
+Uma instalação revogada não pode receber renovação, reativação, suspensão ou uma segunda licença.
+
+Um novo contrato definitivo exige uma nova instalação, novo código e novo segredo.
+
+---
+
+## Validação de licenças
+
+O endpoint:
+
+```http
+POST /api/v1/license/validate
+```
+
+Recebe:
+
+```json
+{
+  "installationId": "BANABUIU-001",
+  "installationSecret": "SEGREDO_REAL_DA_INSTALACAO"
+}
+```
+
+O segredo é gerado com 48 bytes aleatórios e apresentado somente na criação da instalação.
+
+Não existe endpoint para consultar o segredo novamente.
+
+O banco armazena um digest SHA-256 do segredo de alta entropia, com comparação segura por `timingSafeEqual`.
+
+Instalações desconhecidas e credenciais inválidas retornam o mesmo erro:
+
+```text
+401 INVALID_INSTALLATION_CREDENTIALS
+```
+
+Depois da autenticação, uma instalação sem licença retorna:
+
+```text
+404 LICENSE_NOT_FOUND
+```
+
+> [!IMPORTANT]
+> Uma resposta HTTP 200 indica que a validação foi concluída. Não significa necessariamente que o software está autorizado a funcionar. O consumidor precisa verificar `license.status`.
+
+### Assinatura digital
+
+A assinatura Ed25519 protege exatamente estes campos:
+
+```text
+installationId
+product
+status
+issuedAt
+expiresAt
+graceUntil
+```
+
+O protocolo v1 utiliza JSON compacto com chaves ordenadas em ASCII:
+
+```text
+expiresAt
+graceUntil
+installationId
+issuedAt
+product
+status
+```
+
+As strings são codificadas em UTF-8 e escapadas segundo `JSON.stringify`.
+
+A assinatura é representada em base64url sem padding.
+
+A ordem original das propriedades não altera a verificação. Campos adicionais são rejeitados.
+
+O módulo:
+
+```text
+src/utils/signature.ts
+```
+
+Exporta:
+
+```typescript
+canonicalizeLicense
+signLicense
+verifyLicense
+```
+
+### Verificar uma resposta
+
+```powershell
+npm run verify-license -- response.json keys/license-public.pem
+```
+
+A verificação utiliza exclusivamente a chave pública.
+
+Alterar qualquer campo assinado invalida a assinatura.
+
+A assinatura comprova autenticidade e integridade, mas não impede reutilização de uma resposta antiga. O consumidor futuro precisará implementar uma política de frescor de `issuedAt` e armazenamento seguro.
+
+---
+
+## Exemplo de operação
+
+### 1. Autenticar administrador
 
 ```powershell
 $base = 'http://localhost:3000/api/v1'
+
 $emailAdmin = Read-Host 'Email do admin'
 $senhaSegura = Read-Host 'Senha do admin' -AsSecureString
-$credential = [System.Management.Automation.PSCredential]::new($emailAdmin, $senhaSegura)
-$loginBody = @{ email=$emailAdmin; password=$credential.GetNetworkCredential().Password } | ConvertTo-Json
-$login = Invoke-RestMethod "$base/auth/login" -Method Post -ContentType 'application/json' -Body $loginBody
+
+$credential = [System.Management.Automation.PSCredential]::new(
+  $emailAdmin,
+  $senhaSegura
+)
+
+$loginBody = @{
+  email = $emailAdmin
+  password = $credential.GetNetworkCredential().Password
+} | ConvertTo-Json
+
+$login = Invoke-RestMethod "$base/auth/login" `
+  -Method Post `
+  -ContentType 'application/json' `
+  -Body $loginBody
+
 Remove-Variable loginBody,credential,senhaSegura
-$headers = @{ Authorization="Bearer $($login.token)" }
 
-$body = @{ name='Prefeitura Municipal de Banabuiú' } | ConvertTo-Json
-$cliente = Invoke-RestMethod "$base/clients" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+$headers = @{
+  Authorization = "Bearer $($login.token)"
+}
+```
 
-$body = @{ name='Sistema de Atendimento'; code='sistema-atendimento' } | ConvertTo-Json
-$produto = Invoke-RestMethod "$base/products" -Method Post -Headers $headers -ContentType 'application/json' -Body $body
+### 2. Criar cliente
 
-$body = @{ clientId=$cliente.data.id; productId=$produto.data.id; installationId='BANABUIU-001'; name='Servidor Banabuiú' } | ConvertTo-Json
-$instalacao = Invoke-RestMethod "$base/installations" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
-# Preserve $instalacao.installationSecret em um gerenciador de segredos.
-# O servidor não disponibiliza esse valor novamente.
+```powershell
+$body = @{
+  name = 'Prefeitura Municipal de Banabuiú'
+} | ConvertTo-Json
 
-$body = @{ installationId=$instalacao.data.id; days=30; graceDays=5 } | ConvertTo-Json
-$licenca = Invoke-RestMethod "$base/licenses" -Method Post -Headers $headers -ContentType 'application/json' -Body $body
+$cliente = Invoke-RestMethod "$base/clients" `
+  -Method Post `
+  -Headers $headers `
+  -ContentType 'application/json; charset=utf-8' `
+  -Body ([Text.Encoding]::UTF8.GetBytes($body))
+```
 
-$body = @{ installationId='BANABUIU-001'; installationSecret=$instalacao.installationSecret } | ConvertTo-Json
-$validacao = Invoke-RestMethod "$base/license/validate" -Method Post -ContentType 'application/json' -Body $body
-$validacao | ConvertTo-Json -Depth 5
-$validacao | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 response.json
+### 3. Criar produto
+
+```powershell
+$body = @{
+  name = 'Sistema de Atendimento'
+  code = 'sistema-atendimento'
+} | ConvertTo-Json
+
+$produto = Invoke-RestMethod "$base/products" `
+  -Method Post `
+  -Headers $headers `
+  -ContentType 'application/json' `
+  -Body $body
+```
+
+### 4. Criar instalação
+
+```powershell
+$body = @{
+  clientId = $cliente.data.id
+  productId = $produto.data.id
+  installationId = 'BANABUIU-001'
+  name = 'Servidor Banabuiú'
+} | ConvertTo-Json
+
+$instalacao = Invoke-RestMethod "$base/installations" `
+  -Method Post `
+  -Headers $headers `
+  -ContentType 'application/json; charset=utf-8' `
+  -Body ([Text.Encoding]::UTF8.GetBytes($body))
+```
+
+Guarde `installationSecret` em um gerenciador de segredos.
+
+### 5. Criar licença
+
+```powershell
+$body = @{
+  installationId = $instalacao.data.id
+  days = 30
+  graceDays = 5
+} | ConvertTo-Json
+
+$licenca = Invoke-RestMethod "$base/licenses" `
+  -Method Post `
+  -Headers $headers `
+  -ContentType 'application/json' `
+  -Body $body
+```
+
+Observe que a criação da licença utiliza o UUID interno da instalação.
+
+### 6. Validar licença
+
+```powershell
+$body = @{
+  installationId = 'BANABUIU-001'
+  installationSecret = $instalacao.installationSecret
+} | ConvertTo-Json
+
+$validacao = Invoke-RestMethod "$base/license/validate" `
+  -Method Post `
+  -ContentType 'application/json' `
+  -Body $body
+
+$validacao | ConvertTo-Json -Depth 5 |
+  Set-Content -Encoding UTF8 response.json
+
 Remove-Variable body,instalacao
+
 npm run verify-license -- response.json keys/license-public.pem
 ```
 
-Este roteiro é manual e destinado ao banco novo: rode uma vez. Produto/installationId repetidos retornam 409. Ao reutilizar dados, obtenha os UUIDs nas listagens em vez de recriar registros. O `installationId` de criação de licença é o **UUID interno** de `Installation`; o `installationId` de validação é o **código externo** `BANABUIU-001`. Cliente e produto não aparecem na resposta pública além do código do produto.
+O código externo `BANABUIU-001` é utilizado na validação.
 
-Operações sobre a licença criada (na mesma sessão PowerShell):
+Esse roteiro é destinado a um banco novo e deve ser executado uma vez. Identificadores de produto e instalação repetidos retornam conflito 409.
+
+O arquivo `response.json` contém uma resposta de validação e deve ser tratado conforme a política de segurança do ambiente.
+
+### Operações administrativas
+
+Renovar:
 
 ```powershell
 $licenseId = $licenca.data.id
-Invoke-RestMethod "$base/licenses/$licenseId/renew" -Method Post -Headers $headers -ContentType 'application/json' -Body '{"days":30,"graceDays":5}'
-Invoke-RestMethod "$base/licenses/$licenseId/suspend" -Method Post -Headers $headers -ContentType 'application/json' -Body '{"reason":"Suspensao administrativa"}'
-Invoke-RestMethod "$base/licenses/$licenseId/reactivate" -Method Post -Headers $headers -ContentType 'application/json' -Body '{}'
-# Revogação é definitiva; execute somente quando desejar encerrar essa instalação.
-# Invoke-RestMethod "$base/licenses/$licenseId/revoke" -Method Post -Headers $headers -ContentType 'application/json' -Body '{"reason":"Contrato encerrado"}'
-Invoke-RestMethod "$base/events?licenseId=$licenseId&page=1&limit=20" -Headers $headers
+
+Invoke-RestMethod "$base/licenses/$licenseId/renew" `
+  -Method Post `
+  -Headers $headers `
+  -ContentType 'application/json' `
+  -Body '{"days":30,"graceDays":5}'
 ```
 
-## Exemplos curl
+Suspender:
 
-Em bash/zsh, crie `login.json` em local protegido com seu email/senha reais e `validation.json` com `installationId`/`installationSecret` obtidos na criação. Não versione nem registre esses arquivos. `TOKEN`, `CLIENT_ID`, `PRODUCT_ID` e `INSTALLATION_UUID` abaixo são variáveis preenchidas a partir das respostas anteriores; não são credenciais fornecidas pelo projeto.
-
-```bash
-curl -sS http://localhost:3000/health
-curl -sS http://localhost:3000/api/v1/auth/login -H 'Content-Type: application/json' --data-binary @login.json
-curl -sS http://localhost:3000/api/v1/clients -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"name":"Prefeitura Municipal de Banabuiú"}'
-curl -sS http://localhost:3000/api/v1/products -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"name":"Sistema de Atendimento","code":"sistema-atendimento"}'
-curl -sS http://localhost:3000/api/v1/installations -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "{\"clientId\":\"$CLIENT_ID\",\"productId\":\"$PRODUCT_ID\",\"installationId\":\"BANABUIU-001\",\"name\":\"Servidor Banabuiú\"}"
-curl -sS http://localhost:3000/api/v1/licenses -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "{\"installationId\":\"$INSTALLATION_UUID\",\"days\":30,\"graceDays\":5}"
-curl -sS http://localhost:3000/api/v1/license/validate -H 'Content-Type: application/json' --data-binary @validation.json -o response.json
-npm run verify-license -- response.json keys/license-public.pem
+```powershell
+Invoke-RestMethod "$base/licenses/$licenseId/suspend" `
+  -Method Post `
+  -Headers $headers `
+  -ContentType 'application/json' `
+  -Body '{"reason":"Suspensao administrativa"}'
 ```
 
-No Windows, prefira o roteiro `Invoke-RestMethod` acima ou `curl.exe --data-binary @arquivo.json`; o alias `curl` e o tratamento de aspas do PowerShell variam.
+Reativar:
 
-## Regras de licença e assinatura
+```powershell
+Invoke-RestMethod "$base/licenses/$licenseId/reactivate" `
+  -Method Post `
+  -Headers $headers `
+  -ContentType 'application/json' `
+  -Body '{}'
+```
 
-Há **uma licença por instalação**, mantida e renovada sem apagar histórico. Uma instalação revogada não aceita renovação, reativação, suspensão ou outra licença; um novo contrato definitivo deve ter nova instalação/código e novo segredo. Isso evita escolher arbitrariamente entre licenças sobrepostas.
+Consultar auditoria:
 
-* `ACTIVE`: administrativa ativa, entidades habilitadas e `startsAt <= agora <= expiresAt`.
-* `GRACE`: `expiresAt < agora <= graceUntil`.
-* `EXPIRED`: `agora > graceUntil`; também é o estado restritivo antes de `startsAt` (a API cria licenças com início imediato).
-* `SUSPENDED`: suspensão administrativa ou instalação/cliente/produto inativo, com prioridade sobre datas.
-* `REVOKED`: revogação administrativa definitiva, com prioridade máxima, inclusive sobre entidades inativas.
+```powershell
+Invoke-RestMethod "$base/events?licenseId=$licenseId&page=1&limit=20" `
+  -Headers $headers
+```
 
-Os únicos estados administrativos são `ACTIVE`, `SUSPENDED`, `REVOKED`; `GRACE`/`EXPIRED` são calculados. O servidor usa seu próprio relógio em UTC; não aceita horário/status no request público. Configure sincronização de horário no servidor. Dias significam períodos de **24 horas exatas**, não fim de dia local. Criação: `startsAt=agora`, `expiresAt=agora+days`, `graceUntil=expiresAt+graceDays`. `days` entre 1 e 3650; `graceDays` entre 0 e 365, padrão 5.
+A revogação é definitiva e deve ser utilizada somente quando houver intenção de encerrar permanentemente a licença.
 
-Renovação: `base=max(expiresAt,agora)` e `expiresAt=base+days`; `graceUntil=novo expiresAt+graceDays`. **Toda licença vencida, inclusive em carência, renova a partir de agora.** Renovação mantém a suspensão; reativação remove só a suspensão administrativa, sem prolongar datas ou reabilitar cliente/produto/instalação. Pode continuar `EXPIRED` após reativação. A suspensão anterior permanece no evento histórico; `suspendedAt` indica apenas suspensão corrente.
-
-Credenciais incorretas e instalação inexistente retornam o mesmo 401 `INVALID_INSTALLATION_CREDENTIALS`. Somente após validar o segredo, ausência de licença retorna 404 `LICENSE_NOT_FOUND`. Entidades inativas retornam resposta assinada `SUSPENDED`; licença revogada permanece `REVOKED`. Um 200 significa consulta autenticada e concluída, **não autorização de uso**: o consumidor deverá avaliar `license.status`.
-
-Segredos de instalação têm 48 bytes aleatórios (64 caracteres base64url) e são mostrados apenas na resposta de criação. SHA-256 é apropriado aqui pela alta entropia do segredo; senhas humanas usam bcrypt. Os digests são comparados com `timingSafeEqual`, inclusive com digest substituto para IDs desconhecidos. Não se usa IP nem headers como identidade de instalação.
-
-A assinatura Ed25519 abrange exatamente os seis campos de `license`: `installationId`, `product`, `status`, `issuedAt`, `expiresAt`, `graceUntil`. Protocolo v1: objeto plano, chaves ordenadas em ASCII (`expiresAt`, `graceUntil`, `installationId`, `issuedAt`, `product`, `status`), JSON compacto sem espaços, strings escapadas por `JSON.stringify`, codificação UTF-8. Não existe conversão de datas na canonicalização; assinam-se as strings UTC retornadas. A assinatura usa base64url sem padding. Ordem original de propriedades é irrelevante; campos extras são rejeitados.
-
-`src/utils/signature.ts` exporta `canonicalizeLicense`, `signLicense`, `verifyLicense`. O script de verificação usa **somente a chave pública**. Alterar qualquer campo invalida a assinatura. A assinatura comprova autenticidade; não impede replay de uma resposta antiga: o futuro consumidor precisará de política de validade/frescor de `issuedAt` e armazenamento seguro. Essa integração não faz parte desta etapa.
+---
 
 ## Auditoria e concorrência
 
-Criação de instalação/licença e cada mudança administrativa geram evento na **mesma transação** que os dados, incluindo UUID do admin nos eventos administrativos. `LICENSE_VALIDATED` é gravado na primeira validação, em mudança do estado final, ou na primeira validação após 24 horas desde o último evento. `lastValidationAt` é atualizado em toda validação autenticada com licença. Falhas de credenciais não criam eventos; rate limit controla abuso. O último estado/evento fica na instalação para deduplicação sem varrer a tabela de eventos.
+As operações administrativas e a criação de entidades relevantes geram eventos de auditoria na mesma transação que os dados.
 
-Renovação, suspensão, reativação, revogação e validação adquirem lock PostgreSQL na mesma instalação, impedindo perda de renovação e duplicação concorrente de eventos. Validação também mantém locks de leitura nos registros do cliente/produto durante o cálculo. Assinatura é produzida na transação; falha na assinatura desfaz a atualização de auditoria. Não há limpeza automática do histórico; em operação prolongada, planeje backup e arquivamento de eventos conforme necessidade.
+Os eventos administrativos registram o UUID do administrador responsável.
 
-## Estrutura
+### Validação auditada
+
+O evento `LICENSE_VALIDATED` é registrado:
+
+- Na primeira validação.
+- Quando o estado final muda.
+- Na primeira validação após 24 horas do último evento correspondente.
+
+O campo `lastValidationAt` é atualizado em toda validação autenticada com licença.
+
+Credenciais inválidas não geram eventos de validação.
+
+### Consistência transacional
+
+A aplicação utiliza locks PostgreSQL associados à instalação para coordenar:
+
+- Renovação.
+- Suspensão.
+- Reativação.
+- Revogação.
+- Validação.
+
+Isso evita perda de atualizações concorrentes e duplicação indevida de eventos.
+
+A assinatura é produzida dentro da transação. Uma falha na assinatura desfaz a atualização de auditoria correspondente.
+
+Não existe limpeza automática do histórico.
+
+---
+
+## Segurança
+
+A aplicação implementa controles em diferentes camadas.
+
+| Proteção | Implementação |
+| --- | --- |
+| Senhas administrativas | bcrypt custo 12 |
+| Sessões administrativas | JWT |
+| Assinatura de licenças | Ed25519 |
+| Credenciais de instalação | Segredos aleatórios de alta entropia |
+| Comparação de digests | `timingSafeEqual` |
+| Validação de entrada | Zod |
+| Limitação de requisições | Rate limiting |
+| Integridade de operações | Transações PostgreSQL |
+| Auditoria | Eventos persistentes |
+| Segredos de produção | Variáveis protegidas ou arquivos restritos |
+
+A API não registra intencionalmente senhas, tokens, hashes, segredos ou corpos de requisições.
+
+As respostas de erro não expõem stack traces internos.
+
+### HTTPS e proxies
+
+Em produção, utilize HTTPS na plataforma de hospedagem ou proxy.
+
+A configuração atual utiliza:
 
 ```text
-src/
-  app.ts, server.ts
-  config/, middleware/, repositories/, routes/, services/, types/, utils/
-prisma/
-  schema.prisma, migrations/
-scripts/
-  create-admin.ts, generate-signing-keys.ts, verify-license.ts, test-runner.mjs
-keys/.gitkeep
-tests/
-  api.test.ts, policy.test.ts
-.env.example, package.json, package-lock.json, tsconfig.json
+trust proxy = false
 ```
 
-Não foram gerados admin, chaves ou `.env` de produção automaticamente. Esses valores pertencem ao ambiente de implantação. A API foi construída para funcionar isoladamente; a conexão ao Electron permanece fora do escopo.
+A aplicação não confia automaticamente em `X-Forwarded-For`.
+
+Atrás de um proxy, os limites podem ser compartilhados pelo IP desse proxy até que uma configuração explícita de proxies confiáveis seja adotada.
+
+O limiter em memória é apropriado a uma instância. Para múltiplas réplicas, considere armazenamento compartilhado para limites globais.
+
+O endereço IP não define o direito de utilização de uma licença.
+
+---
+
+## Testes e qualidade
+
+### Verificação de tipos
+
+```powershell
+npm run typecheck
+```
+
+### Build
+
+```powershell
+npm run build
+```
+
+### Testes unitários
+
+```powershell
+npm run test:unit
+```
+
+Os testes unitários não exigem PostgreSQL.
+
+### Suíte completa
+
+```powershell
+npm test
+```
+
+A suíte completa utiliza PostgreSQL 17 isolado em Docker.
+
+O runner:
+
+1. Cria um contêiner temporário.
+2. Seleciona uma porta aleatória de loopback.
+3. Gera credenciais temporárias.
+4. Aplica a migration real.
+5. Executa os testes.
+6. Remove os recursos temporários criados.
+
+Não utiliza o `DATABASE_URL` do ambiente como destino dos testes.
+
+Não reseta bancos existentes.
+
+Se o Docker ou a migration falhar, o teste falha explicitamente.
+
+Se houver encerramento forçado, verifique contêineres temporários com prefixo `central-licencas-test-` antes de removê-los.
+
+### Verificação de dependências
+
+```powershell
+npm audit
+```
+
+### Executar sem o teste de revogação permanente
+
+```powershell
+npm test -- --testNamePattern '^(?!.*REVOKED is permanent)'
+```
+
+### Cobertura funcional
+
+Os testes incluem autenticação, JWT inválido e expirado, permissões administrativas, CRUD, validação Zod, integridade relacional, licenciamento, estados administrativos, renovação concorrente, revogação definitiva, assinatura Ed25519, adulteração de respostas, auditoria, paginação, rate limiting, erros HTTP e headers de segurança.
+
+---
+
+## Deploy no Railway
+
+A publicação pode utilizar Railway com PostgreSQL exclusivo.
+
+A configuração abaixo descreve o procedimento planejado; não significa que o deploy já tenha sido executado.
+
+### Configuração do serviço
+
+| Campo | Valor |
+| --- | --- |
+| Root Directory | `central-licencas` |
+| Runtime | Node.js 22.22.3+ |
+| Build Command | `npm ci --include=dev && npm run prisma:generate && npm run build` |
+| Pre-Deploy Command | `npm run db:migrate` |
+| Start Command | `npm start` |
+| Health Check | `/health` |
+
+### Variáveis
+
+Configure no serviço da API:
+
+```text
+NODE_ENV
+DATABASE_URL
+JWT_SECRET
+JWT_EXPIRES_IN
+LICENSE_PRIVATE_KEY_BASE64
+LICENSE_PUBLIC_KEY_BASE64
+```
+
+O Railway pode fornecer a variável `PORT` automaticamente.
+
+As configurações de rate limiting são opcionais.
+
+Use a referência à URL do PostgreSQL exclusivo da Central.
+
+Proteja especialmente `JWT_SECRET` e `LICENSE_PRIVATE_KEY_BASE64`, utilizando controles de segredo da plataforma quando apropriado.
+
+Não é necessário enviar arquivos PEM nem criar volume para as chaves quando ambas são fornecidas em Base64.
+
+Não execute automaticamente:
+
+```text
+generate-keys
+create-admin
+```
+
+Essas operações exigem controle administrativo.
+
+### Documentação
+
+- [Variáveis do Railway](https://docs.railway.com/variables)
+- [Start Command](https://docs.railway.com/deployments/start-command)
+- [Transações Prisma 6](https://www.prisma.io/docs/orm/v6/prisma-client/queries/transactions)
+- [Tratamento de erros Express 5](https://expressjs.com/en/5x/guide/error-handling/)
+
+---
+
+## Estrutura do projeto
+
+```text
+central-licencas/
+│
+├── docs/
+│   └── images/
+│       ├── logo.png
+│       ├── dashboard.png
+│       ├── clientes.png
+│       ├── produtos.png
+│       ├── instalacoes.png
+│       ├── licencas.png
+│       ├── auditoria.png
+│       └── login.png
+│
+├── src/
+│   ├── app.ts
+│   ├── server.ts
+│   ├── config/
+│   ├── middleware/
+│   ├── repositories/
+│   ├── routes/
+│   ├── services/
+│   ├── types/
+│   └── utils/
+│
+├── prisma/
+│   ├── schema.prisma
+│   └── migrations/
+│
+├── scripts/
+│   ├── create-admin.ts
+│   ├── generate-signing-keys.ts
+│   ├── verify-license.ts
+│   └── test-runner.mjs
+│
+├── keys/
+│   └── .gitkeep
+│
+├── tests/
+│   ├── api.test.ts
+│   └── policy.test.ts
+│
+├── .env.example
+├── package.json
+├── package-lock.json
+├── tsconfig.json
+├── ADMIN-PANEL-REPORT.md
+└── README.md
+```
+
+A pasta `docs/images/` é a estrutura sugerida para as capturas de tela. Os arquivos de imagem precisam ser adicionados manualmente.
+
+O diretório `keys/` não deve conter chaves privadas versionadas.
+
+---
+
+## Limites do projeto
+
+A Central de Licenças é responsável pelo gerenciamento e validação do licenciamento.
+
+Não fazem parte desta etapa:
+
+- Integração direta com o `sistema-senhas`.
+- Alterações no aplicativo Electron.
+- Processamento de pagamentos.
+- Criação automática de administradores.
+- Distribuição automática de chaves públicas.
+- Política de cache ou funcionamento offline do consumidor.
+
+Essas funcionalidades dependem de etapas específicas de integração.
+
+---
+
+## Documentação complementar
+
+Consulte [ADMIN-PANEL-REPORT.md](ADMIN-PANEL-REPORT.md) para informações adicionais sobre o painel administrativo, endpoints, segurança e validações realizadas.
+
+---
+
+<div align="center">
+
+**Central de Licenças**
+
+Infraestrutura independente para gerenciamento seguro de licenças de software.
+
+<sub>Node.js · TypeScript · PostgreSQL · Prisma · Ed25519</sub>
+
+</div>
